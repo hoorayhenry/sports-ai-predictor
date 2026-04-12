@@ -1,0 +1,26 @@
+# Web framework
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+
+# Database
+sqlalchemy>=2.0.0
+aiosqlite>=0.20.0
+greenlet>=3.0.0
+
+# HTTP clients
+httpx>=0.27.0
+
+# ML / Data
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+xgboost>=2.0.0
+lightgbm>=4.3.0
+
+# Config & logging
+pydantic-settings>=2.2.0
+loguru>=0.7.0
+python-dotenv>=1.0.0
+
+# Scheduling (optional background jobs)
+apscheduler>=3.10.0
