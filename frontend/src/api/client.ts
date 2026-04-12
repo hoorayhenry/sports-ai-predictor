@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { Sport, Competition, Match, ValueBet } from "./types";
+import type { Sport, Competition, Match, ValueBet, MatchDecision, SmartSet, PerformanceStats } from "./types";
 
 const BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000/api/v1";
 
@@ -32,3 +32,20 @@ export const triggerAllPredictions = (sport?: string) =>
 
 export const fetchPredictionStats = () =>
   api.get("/predictions/stats").then((r) => r.data);
+
+// Decision engine
+export const fetchDailyPicks = (sport?: string, days = 7) =>
+  api.get<MatchDecision[]>("/decisions/daily-picks", { params: { ...(sport ? { sport } : {}), days } }).then((r) => r.data);
+
+export const fetchAllDecisions = (params?: {
+  sport?: string; decision?: string; prob_tag?: string; days?: number;
+}) => api.get<MatchDecision[]>("/decisions/all", { params }).then((r) => r.data);
+
+export const fetchSmartSets = (dateStr?: string) =>
+  api.get<SmartSet[]>("/decisions/smart-sets", { params: dateStr ? { date_str: dateStr } : {} }).then((r) => r.data);
+
+export const fetchPerformance = (sport?: string, days?: number) =>
+  api.get<PerformanceStats>("/decisions/performance", { params: { sport, days } }).then((r) => r.data);
+
+export const triggerDecisionsNow = (sendEmail = false) =>
+  api.post("/decisions/run-now", null, { params: { send_email: sendEmail } }).then((r) => r.data);

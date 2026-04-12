@@ -36,3 +36,20 @@ export function pct(v: number | null | undefined): string {
   if (v == null) return "—";
   return `${Math.round(v * 100)}%`;
 }
+
+export function probTagColor(tag: string): { bg: string; text: string; dot: string } {
+  switch (tag) {
+    case "HIGH":   return { bg: "bg-green-500/15",  text: "text-green-400",  dot: "🟢" };
+    case "MEDIUM": return { bg: "bg-yellow-500/15", text: "text-yellow-400", dot: "🟡" };
+    default:       return { bg: "bg-red-500/15",    text: "text-red-400",    dot: "🔴" };
+  }
+}
+
+export function outcomeShort(outcome: string | null): string {
+  if (!outcome) return "—";
+  return {
+    H: "Home Win", D: "Draw", A: "Away Win",
+    over: "Over 2.5", under: "Under 2.5",
+    yes: "Both Score", no: "No BTTS",
+  }[outcome] ?? outcome;
+}

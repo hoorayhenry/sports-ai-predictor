@@ -145,3 +145,115 @@ class Prediction(Base):
     __table_args__ = (
         Index("ix_pred_value", "is_value_bet", "expected_value"),
     )
+
+
+class MatchDecision(Base):
+    """AI decision layer on top of ML predictions. One row per match."""
+    __tablename__ = "match_decisions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"), index=True, unique=True)
+
+    # Scores
+    confidence_score: Mapped[float] = mapped_column(Float, default=0.0)   # 0-100
+    prob_tag: Mapped[str] = mapped_column(String(8), default="RISKY")      # HIGH|MEDIUM|RISKY
+    ai_decision: Mapped[str] = mapped_column(String(8), default="SKIP")   # PLAY|SKIP
+
+    # Top predicted outcome
+    top_prob: Mapped[float] = mapped_column(Float, default=0.0)
+    predicted_outcome: Mapped[Optional[str]] = mapped_column(String(16))  # H/D/A/over/under
+
+    # Volatility
+    has_volatility: Mapped[bool] = mapped_column(Boolean, default=False)
+    volatility_reason: Mapped[Optional[str]] = mapped_column(String(128))
+
+    # Component scores (for transparency)
+    prob_component: Mapped[float] = mapped_column(Float, default=0.0)
+    ev_component: Mapped[float] = mapped_column(Float, default=0.0)
+    form_component: Mapped[float] = mapped_column(Float, default=0.0)
+    consistency_component: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # Recommended odds and stake
+    recommended_odds: Mapped[Optional[float]] = mapped_column(Float)
+    recommended_stake_pct: Mapped[Optional[float]] = mapped_column(Float)  # % of bankroll
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    match: Mapped["Match"] = relationship()
+
+    __table_args__ = (
+        Index("ix_decision_play", "ai_decision", "confidence_score"),
+    )
+
+
+class SmartSet(Base):
+    """A curated set of 10 matches generated daily by the AI."""
+    __tablename__ = "smart_sets"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    set_number: Mapped[int] = mapped_column(Integer)          # 1-10
+    generated_date: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+    # Matches stored as JSON
+    matches_json: Mapped[str] = mapped_column(Text)           # [{match_id, ...}, ...]
+    match_count: Mapped[int] = mapped_column(Integer, default=10)
+
+    # Aggregate stats
+    overall_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    combined_probability: Mapped[float] = mapped_column(Float, default=0.0)  # product
+    avg_odds: Mapped[float] = mapped_column(Float, default=0.0)
+    risk_level: Mapped[str] = mapped_column(String(8), default="MEDIUM")    # LOW|MEDIUM|HIGH
+
+    # Resolution
+    status: Mapped[str] = mapped_column(String(16), default="pending")      # pending|partial|resolved
+    wins: Mapped[int] = mapped_column(Integer, default=0)
+    losses: Mapped[int] = mapped_column(Integer, default=0)
+    roi: Mapped[Optional[float]] = mapped_column(Float)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("set_number", "generated_date"),
+    )
+
+
+class PerformanceLog(Base):
+    """Tracks resolved prediction outcomes for ROI and self-optimization."""
+    __tablename__ = "performance_logs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"), index=True)
+    sport_key: Mapped[str] = mapped_column(String(32))
+    competition: Mapped[str] = mapped_column(String(128))
+
+    # What we predicted
+    ai_decision: Mapped[str] = mapped_column(String(8))        # PLAY|SKIP
+    confidence_score: Mapped[float] = mapped_column(Float)
+    predicted_outcome: Mapped[str] = mapped_column(String(16)) # H/D/A/over/under
+    predicted_prob: Mapped[float] = mapped_column(Float)
+    odds_used: Mapped[Optional[float]] = mapped_column(Float)
+    stake_pct: Mapped[Optional[float]] = mapped_column(Float)
+
+    # Actual result
+    actual_result: Mapped[Optional[str]] = mapped_column(String(16))
+    is_correct: Mapped[Optional[bool]] = mapped_column(Boolean)
+    profit_loss_units: Mapped[Optional[float]] = mapped_column(Float)  # +ve = profit
+
+    log_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    match: Mapped["Match"] = relationship()
+
+    __table_args__ = (
+        Index("ix_perf_sport_comp", "sport_key", "competition"),
+    )
+
+
+class OptimizationWeight(Base):
+    """Per-competition/sport confidence boosts from self-optimization."""
+    __tablename__ = "optimization_weights"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scope_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    # scope_key examples: "football", "football_Premier League", "global"
+    scope_type: Mapped[str] = mapped_column(String(16))   # sport|competition|global
+    weight: Mapped[float] = mapped_column(Float, default=0.0)  # -10 to +10
+    success_rate: Mapped[float] = mapped_column(Float, default=0.5)
+    sample_size: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

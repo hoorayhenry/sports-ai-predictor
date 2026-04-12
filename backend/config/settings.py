@@ -32,6 +32,19 @@ class Settings(BaseSettings):
         "http://127.0.0.1:5173",
     ]
 
+    # Email — set in .env to enable daily automated email
+    email_smtp_host: str = ""            # e.g. smtp.gmail.com
+    email_smtp_port: int = 587           # 587=TLS, 465=SSL
+    email_smtp_user: str = ""            # Gmail address or SMTP username
+    email_smtp_pass: str = ""            # App password / SMTP password
+    email_from: str = "Sports AI <noreply@sportsai.local>"
+    email_recipient: str = ""            # Who receives the daily email
+
+    # Decision thresholds (can be overridden in .env)
+    play_prob_threshold: float = 0.65
+    play_confidence_threshold: float = 70.0
+    daily_email_hour: int = 8            # UTC hour to send daily email
+
 
 @lru_cache
 def get_settings() -> Settings:

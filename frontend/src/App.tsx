@@ -1,10 +1,10 @@
 import { Routes, Route } from "react-router-dom";
 import Navbar from "./components/Navbar";
 import HomePage from "./pages/HomePage";
-import PredictionsPage from "./pages/PredictionsPage";
-import ValueBetsPage from "./pages/ValueBetsPage";
+import DailyPicksPage from "./pages/DailyPicksPage";
+import SmartSetsPage from "./pages/SmartSetsPage";
+import PerformancePage from "./pages/PerformancePage";
 import MatchDetailPage from "./pages/MatchDetailPage";
-import StatsPage from "./pages/StatsPage";
 
 export default function App() {
   return (
@@ -12,11 +12,11 @@ export default function App() {
       <Navbar />
       <main className="md:pt-2">
         <Routes>
-          <Route path="/" element={<HomePage />} />
-          <Route path="/predictions" element={<PredictionsPage />} />
-          <Route path="/value-bets" element={<ValueBetsPage />} />
-          <Route path="/match/:id" element={<MatchDetailPage />} />
-          <Route path="/stats" element={<StatsPage />} />
+          <Route path="/"            element={<HomePage />} />
+          <Route path="/picks"       element={<DailyPicksPage />} />
+          <Route path="/sets"        element={<SmartSetsPage />} />
+          <Route path="/performance" element={<PerformancePage />} />
+          <Route path="/match/:id"   element={<MatchDetailPage />} />
         </Routes>
       </main>
     </div>

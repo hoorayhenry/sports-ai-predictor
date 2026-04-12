@@ -1,23 +1,26 @@
 import { Link, useLocation } from "react-router-dom";
-import { TrendingUp, Zap, BarChart2, Home } from "lucide-react";
+import { Home, Flame, Target, BarChart2 } from "lucide-react";
 
 const NAV = [
-  { to: "/", label: "Home", icon: Home },
-  { to: "/predictions", label: "Predictions", icon: TrendingUp },
-  { to: "/value-bets", label: "Value Bets", icon: Zap },
-  { to: "/stats", label: "Stats", icon: BarChart2 },
+  { to: "/",            label: "Home",     icon: Home },
+  { to: "/picks",       label: "Picks",    icon: Flame },
+  { to: "/sets",        label: "Sets",     icon: Target },
+  { to: "/performance", label: "Results",  icon: BarChart2 },
 ];
 
 export default function Navbar() {
   const { pathname } = useLocation();
   return (
     <>
-      {/* Top bar — desktop only */}
+      {/* Top bar — desktop */}
       <header className="hidden md:flex items-center justify-between px-6 py-4 bg-[#1e293b] border-b border-slate-700/50">
         <Link to="/" className="flex items-center gap-2 text-xl font-bold text-white">
           <span className="text-2xl">⚽</span>
           <span className="text-sky-400">Sports</span>
           <span>AI</span>
+          <span className="text-xs bg-purple-500/20 text-purple-400 border border-purple-500/30 px-2 py-0.5 rounded-full font-medium ml-1">
+            Autonomous
+          </span>
         </Link>
         <nav className="flex items-center gap-1">
           {NAV.map(({ to, label }) => (

@@ -56,6 +56,86 @@ export interface Match {
   prediction: Prediction | null;
 }
 
+export interface MatchDecision {
+  match_id: number;
+  sport: string | null;
+  sport_icon: string;
+  competition: string | null;
+  country: string | null;
+  home_team: string;
+  away_team: string;
+  match_date: string;
+  status: string;
+  // Decision
+  ai_decision: "PLAY" | "SKIP";
+  confidence_score: number;
+  prob_tag: "HIGH" | "MEDIUM" | "RISKY";
+  top_prob: number;
+  predicted_outcome: string | null;
+  has_volatility: boolean;
+  volatility_reason: string | null;
+  recommended_odds: number | null;
+  recommended_stake_pct: number | null;
+  score_breakdown: {
+    probability: number;
+    expected_value: number;
+    form: number;
+    consistency: number;
+  };
+  // Probabilities
+  home_win_prob: number | null;
+  draw_prob: number | null;
+  away_win_prob: number | null;
+  over25_prob: number | null;
+  btts_prob: number | null;
+  is_value_bet: boolean;
+  expected_value: number | null;
+}
+
+export interface SmartSetMatch {
+  match_id: number;
+  home_team: string;
+  away_team: string;
+  sport: string;
+  sport_icon: string;
+  competition: string;
+  match_date: string;
+  ai_decision: string;
+  confidence: number;
+  prob_tag: string;
+  predicted_outcome: string;
+  top_prob: number;
+  rec_odds: number;
+}
+
+export interface SmartSet {
+  id: number;
+  set_number: number;
+  generated_date: string;
+  match_count: number;
+  overall_confidence: number;
+  combined_probability: number;
+  avg_odds: number;
+  risk_level: "LOW" | "MEDIUM" | "HIGH";
+  status: string;
+  wins: number;
+  losses: number;
+  roi: number | null;
+  matches: SmartSetMatch[];
+}
+
+export interface PerformanceStats {
+  period_days: number;
+  total_picks: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  total_pnl_units: number;
+  roi_pct: number;
+  by_sport: Record<string, { wins: number; total: number; pnl: number; win_rate: number }>;
+  top_competitions: { competition: string; win_rate: number; sample: number }[];
+}
+
 export interface ValueBet {
   match_id: number;
   sport: string;
