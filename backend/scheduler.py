@@ -185,6 +185,29 @@ def job_resolve_matches():
         logger.error(f"[SCHEDULER] Resolve job failed: {e}")
 
 
+def job_fetch_intelligence():
+    """
+    Scrape news + extract intelligence signals for upcoming matches.
+    Runs every 30 minutes so injury/lineup news is picked up quickly.
+    Only processes matches without fresh signals (last 6 hours).
+    """
+    logger.info("[SCHEDULER] Fetching intelligence signals...")
+    try:
+        from data.database import get_sync_session
+        from intelligence.signals import run_intelligence_for_upcoming
+
+        api_key = settings.anthropic_api_key
+        if not api_key:
+            logger.debug("[SCHEDULER] ANTHROPIC_API_KEY not set — intelligence job skipped")
+            return
+
+        with get_sync_session() as db:
+            n = run_intelligence_for_upcoming(db, api_key, hours_ahead=48)
+        logger.info(f"[SCHEDULER] Intelligence: {n} new signals saved")
+    except Exception as e:
+        logger.error(f"[SCHEDULER] Intelligence job failed: {e}")
+
+
 def job_fetch_odds():
     """Fetch live odds from Sportybet + Odds API."""
     logger.info("[SCHEDULER] Fetching live odds...")
@@ -200,6 +223,15 @@ def job_fetch_odds():
 def start_scheduler():
     global _scheduler
     _scheduler = BackgroundScheduler(timezone="UTC")
+
+    # Intelligence signals every 30 minutes (real-time news/injury tracking)
+    _scheduler.add_job(
+        job_fetch_intelligence,
+        IntervalTrigger(minutes=30),
+        id="fetch_intelligence",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
 
     # Fetch odds every 6 hours
     _scheduler.add_job(

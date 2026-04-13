@@ -257,3 +257,34 @@ class OptimizationWeight(Base):
     success_rate: Mapped[float] = mapped_column(Float, default=0.5)
     sample_size: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class IntelligenceSignal(Base):
+    """News/social intelligence signals extracted via Claude Haiku NLP."""
+    __tablename__ = "intelligence_signals"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    match_id: Mapped[Optional[int]] = mapped_column(ForeignKey("matches.id"), index=True)
+    team_id: Mapped[Optional[int]] = mapped_column(ForeignKey("participants.id"), index=True)
+    team_name: Mapped[str] = mapped_column(String(128), default="")
+
+    # Signal classification
+    signal_type: Mapped[str] = mapped_column(String(32))   # injury|suspension|return|morale|lineup
+    entity_name: Mapped[Optional[str]] = mapped_column(String(128))  # player name if applicable
+
+    # Scoring: -1.0 (very negative for team) to +1.0 (very positive)
+    impact_score: Mapped[float] = mapped_column(Float, default=0.0)
+    confidence: Mapped[float] = mapped_column(Float, default=0.5)   # 0-1
+
+    # Source
+    source_url: Mapped[Optional[str]] = mapped_column(String(512))
+    source_type: Mapped[str] = mapped_column(String(32), default="news")  # news|rss|twitter
+    raw_text: Mapped[Optional[str]] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    match: Mapped[Optional["Match"]] = relationship(foreign_keys=[match_id])
+    team: Mapped[Optional["Participant"]] = relationship(foreign_keys=[team_id])
+
+    __table_args__ = (
+        Index("ix_intel_match_team", "match_id", "team_id"),
+    )

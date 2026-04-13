@@ -181,9 +181,16 @@ def process_decisions(db: Session) -> int:
         # Optimization weight
         opt_boost = _get_opt_weight(db, sport_key, competition)
 
+        # Intelligence boost (news/injury signals) — max ±15 points
+        try:
+            from intelligence.signals import get_intelligence_boost
+            intel_boost = get_intelligence_boost(db, m.id)
+        except Exception:
+            intel_boost = 0.0
+
         # Compute score
         conf, p_comp, ev_comp, f_comp, c_comp = compute_confidence_score(
-            top_prob, pred.expected_value, elo_diff_abs, opt_boost
+            top_prob, pred.expected_value, elo_diff_abs, opt_boost + intel_boost
         )
 
         # Volatility

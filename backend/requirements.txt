@@ -24,3 +24,8 @@ python-dotenv>=1.0.0
 
 # Scheduling (optional background jobs)
 apscheduler>=3.10.0
+
+# Intelligence layer — real-time news NLP
+anthropic>=0.40.0          # Claude Haiku API for NLP extraction
+feedparser>=6.0.11         # RSS feed parsing (Google News, BBC, Sky Sports)
+trafilatura>=1.12.0        # Article text extraction from URLs

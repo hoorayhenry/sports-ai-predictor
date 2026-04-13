@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # football-data.org  (optional, supplements football-data.co.uk CSVs)
     football_data_key: str = ""
 
+    # Anthropic (Claude Haiku) — for real-time news NLP extraction
+    # Get your key at https://console.anthropic.com
+    anthropic_api_key: str = ""
+
     # ── ML hyperparameters ────────────────────────────────────────────
     model_dir:            str   = "ml/saved"
     confidence_threshold: float = 0.55

@@ -5,13 +5,13 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
-from data.database import get_async_session
+from data.database import get_async_session, get_sync_session
 from data.db_models.models import Match, Competition, Sport, MatchOdds, Prediction
 
 router = APIRouter(prefix="/matches", tags=["matches"])
 
 
-def _fmt_match(m: Match, odds: list = None, pred: Prediction = None) -> dict:
+def _fmt_match(m: Match, odds: list = None, pred: Prediction = None, intelligence: dict = None) -> dict:
     o_dict: dict = {}
     for o in (odds or []):
         key = f"{o.market}_{o.outcome}"
@@ -37,6 +37,7 @@ def _fmt_match(m: Match, odds: list = None, pred: Prediction = None) -> dict:
         "result": m.result,
         "odds": list(o_dict.values()),
         "prediction": _fmt_pred(pred) if pred else None,
+        "intelligence": intelligence or {"has_intelligence": False, "signals": []},
     }
 
 
@@ -130,10 +131,22 @@ async def list_matches(
     result = await db.execute(q)
     matches = result.scalars().all()
 
+    # Load intelligence signals (sync, lightweight)
+    match_ids = [m.id for m in matches]
+    intel_map: dict = {}
+    if match_ids:
+        try:
+            from intelligence.signals import get_match_intelligence_summary
+            with get_sync_session() as sync_db:
+                for mid in match_ids:
+                    intel_map[mid] = get_match_intelligence_summary(sync_db, mid)
+        except Exception:
+            pass
+
     out = []
     for m in matches:
         pred = m.predictions[0] if m.predictions else None
-        out.append(_fmt_match(m, list(m.odds), pred))
+        out.append(_fmt_match(m, list(m.odds), pred, intel_map.get(m.id)))
 
     return {
         "matches": out,
@@ -162,4 +175,11 @@ async def get_match(match_id: int, db: AsyncSession = Depends(get_async_session)
         from fastapi import HTTPException
         raise HTTPException(404, "Match not found")
     pred = m.predictions[0] if m.predictions else None
-    return _fmt_match(m, list(m.odds), pred)
+    intel = None
+    try:
+        from intelligence.signals import get_match_intelligence_summary
+        with get_sync_session() as sync_db:
+            intel = get_match_intelligence_summary(sync_db, match_id)
+    except Exception:
+        pass
+    return _fmt_match(m, list(m.odds), pred, intel)
