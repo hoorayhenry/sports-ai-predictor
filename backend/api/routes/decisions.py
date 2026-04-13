@@ -264,6 +264,82 @@ async def performance(
     }
 
 
+@router.get("/history")
+async def prediction_history(
+    sport:    Optional[str] = Query(None),
+    days:     int           = Query(90),
+    decision: Optional[str] = Query(None, description="PLAY or SKIP"),
+    limit:    int           = Query(200),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Full prediction history — every resolved match with:
+      - what the AI predicted
+      - the actual result
+      - whether the prediction was correct
+      - profit/loss in units
+    """
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
+    q = (
+        select(PerformanceLog)
+        .where(
+            PerformanceLog.log_date >= cutoff,
+            PerformanceLog.is_correct.isnot(None),
+        )
+        .order_by(PerformanceLog.log_date.desc())
+        .limit(limit)
+    )
+    if sport:
+        q = q.where(PerformanceLog.sport_key == sport)
+    if decision:
+        q = q.where(PerformanceLog.ai_decision == decision.upper())
+
+    result = await db.execute(q)
+    logs   = result.scalars().all()
+
+    # Enrich with match team names
+    out = []
+    for lg in logs:
+        match_res = await db.execute(
+            select(Match)
+            .options(
+                selectinload(Match.home),
+                selectinload(Match.away),
+                selectinload(Match.competition).selectinload(Competition.sport),
+            )
+            .where(Match.id == lg.match_id)
+        )
+        m = match_res.scalar_one_or_none()
+
+        outcome_map = {"H": "Home Win", "D": "Draw", "A": "Away Win"}
+        out.append({
+            "match_id":          lg.match_id,
+            "sport":             lg.sport_key,
+            "sport_icon":        (m.competition.sport.icon if m and m.competition and m.competition.sport else "🏆"),
+            "competition":       lg.competition,
+            "home_team":         (m.home.name if m and m.home else "—"),
+            "away_team":         (m.away.name if m and m.away else "—"),
+            "match_date":        (m.match_date.isoformat() if m else None),
+            # Prediction
+            "ai_decision":       lg.ai_decision,
+            "confidence_score":  lg.confidence_score,
+            "predicted_outcome": lg.predicted_outcome,
+            "predicted_outcome_label": outcome_map.get(lg.predicted_outcome, lg.predicted_outcome),
+            "predicted_prob":    round(lg.predicted_prob, 4) if lg.predicted_prob else None,
+            "recommended_odds":  round(lg.odds_used, 2) if lg.odds_used else None,
+            # Actual result
+            "actual_result":     lg.actual_result,
+            "actual_result_label": outcome_map.get(lg.actual_result or "", lg.actual_result or ""),
+            # Outcome
+            "is_correct":        lg.is_correct,
+            "profit_loss_units": round(lg.profit_loss_units, 4) if lg.profit_loss_units is not None else 0,
+            "resolved_at":       lg.log_date.isoformat(),
+        })
+
+    return out
+
+
 @router.get("/optimization-weights")
 async def optimization_weights(db: AsyncSession = Depends(get_async_session)):
     """Return current self-optimization weights per sport/competition."""

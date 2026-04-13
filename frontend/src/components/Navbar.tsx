@@ -1,11 +1,12 @@
 import { Link, useLocation } from "react-router-dom";
-import { Home, Flame, Target, BarChart2 } from "lucide-react";
+import { Home, Flame, Target, BarChart2, History } from "lucide-react";
 
 const NAV = [
-  { to: "/",            label: "Home",     icon: Home },
-  { to: "/picks",       label: "Picks",    icon: Flame },
-  { to: "/sets",        label: "Sets",     icon: Target },
-  { to: "/performance", label: "Results",  icon: BarChart2 },
+  { to: "/",            label: "Home",    icon: Home },
+  { to: "/picks",       label: "Picks",   icon: Flame },
+  { to: "/sets",        label: "Sets",    icon: Target },
+  { to: "/history",     label: "History", icon: History },
+  { to: "/performance", label: "Stats",   icon: BarChart2 },
 ];
 
 export default function Navbar() {
@@ -49,7 +50,7 @@ export default function Navbar() {
               pathname === to ? "text-sky-400" : "text-slate-500"
             }`}
           >
-            <Icon size={20} />
+            <Icon size={18} />
             <span>{label}</span>
           </Link>
         ))}

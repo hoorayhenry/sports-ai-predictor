@@ -1,16 +1,18 @@
 """
-Ingestion pipeline — pulls data from Sportybet + Odds API and stores to DB.
-Handles all sports in a unified way.
+Data ingestion pipeline.
+
+Entry points:
+  run_live_fetch()        — pull upcoming fixtures + odds (Sportybet + Odds API)
+  run_historical_load()   — download and ingest full historical data (one-time setup)
+  run_full_season_fetch() — download current season from API-Football (all fixtures)
 """
-import random
-import math
-from datetime import datetime, timedelta
+from __future__ import annotations
+from datetime import datetime
 from loguru import logger
 from sqlalchemy.orm import Session
 from data.db_models.models import Sport, Competition, Participant, Match, MatchOdds
 from data.database import get_sync_session
-from data.sources.sportybet import SportybetClient
-from data.sources.odds_api import OddsAPIClient
+
 
 SPORTS_META = {
     "football":          {"name": "Football",          "icon": "⚽"},
@@ -26,12 +28,15 @@ SPORTS_META = {
 }
 
 
+# ── DB helpers ────────────────────────────────────────────────────────
+
 def _get_or_create_sport(db: Session, key: str) -> Sport:
     s = db.query(Sport).filter_by(key=key).first()
     if not s:
         meta = SPORTS_META.get(key, {"name": key.title(), "icon": "🏆"})
-        s = Sport(key=key, name=meta["name"], icon=meta["icon"])
-        db.add(s); db.flush()
+        s    = Sport(key=key, name=meta["name"], icon=meta["icon"])
+        db.add(s)
+        db.flush()
     return s
 
 
@@ -40,234 +45,198 @@ def _get_or_create_competition(db: Session, sport: Sport, name: str, country: st
     c = db.query(Competition).filter_by(external_id=ext_id).first()
     if not c:
         c = Competition(sport_id=sport.id, external_id=ext_id, name=name, country=country)
-        db.add(c); db.flush()
+        db.add(c)
+        db.flush()
     return c
 
 
-def _get_or_create_participant(db: Session, sport: Sport, name: str, ext_suffix: str = "") -> Participant:
-    ext_id = f"{sport.key}_{name}{ext_suffix}".replace(" ", "_").lower()[:100]
+def _get_or_create_participant(db: Session, sport: Sport, name: str) -> Participant:
+    ext_id = f"{sport.key}_{name}".replace(" ", "_").lower()[:100]
     p = db.query(Participant).filter_by(external_id=ext_id).first()
     if not p:
         p = Participant(sport_id=sport.id, external_id=ext_id, name=name)
-        db.add(p); db.flush()
+        db.add(p)
+        db.flush()
     return p
 
 
-def ingest_events(db: Session, events: list[dict]):
-    saved = 0
+# ── Core ingest ───────────────────────────────────────────────────────
+
+def ingest_events(db: Session, events: list[dict]) -> tuple[int, int]:
+    """
+    Upsert a list of normalised event dicts into the database.
+
+    Each event dict must have:
+      external_id, sport, competition, country, home_name, away_name,
+      match_date, status
+
+    Optional:
+      result ("H"/"D"/"A"), home_score, away_score, odds (list of dicts)
+
+    Returns (saved_new, updated_existing).
+    """
+    saved = updated = 0
+
     for ev in events:
         try:
             sport = _get_or_create_sport(db, ev["sport"])
-            comp = _get_or_create_competition(db, sport, ev["competition"], ev.get("country", ""))
-            home = _get_or_create_participant(db, sport, ev["home_name"])
-            away = _get_or_create_participant(db, sport, ev["away_name"])
+            comp  = _get_or_create_competition(db, sport, ev["competition"], ev.get("country", ""))
+            home  = _get_or_create_participant(db, sport, ev["home_name"])
+            away  = _get_or_create_participant(db, sport, ev["away_name"])
 
             match = db.query(Match).filter_by(external_id=ev["external_id"]).first()
+
             if not match:
                 match = Match(
-                    external_id=ev["external_id"],
-                    competition_id=comp.id,
-                    home_id=home.id,
-                    away_id=away.id,
-                    match_date=ev["match_date"],
-                    status=ev.get("status", "scheduled"),
+                    external_id    = ev["external_id"],
+                    competition_id = comp.id,
+                    home_id        = home.id,
+                    away_id        = away.id,
+                    match_date     = ev["match_date"],
+                    status         = ev.get("status", "scheduled"),
+                    result         = ev.get("result"),
+                    home_score     = ev.get("home_score"),
+                    away_score     = ev.get("away_score"),
                 )
-                db.add(match); db.flush()
+                db.add(match)
+                db.flush()
                 saved += 1
+            else:
+                # Update if match has now finished
+                new_status = ev.get("status", match.status)
+                if new_status == "finished" and match.status != "finished":
+                    match.status     = "finished"
+                    match.result     = ev.get("result", match.result)
+                    match.home_score = ev.get("home_score", match.home_score)
+                    match.away_score = ev.get("away_score", match.away_score)
+                    updated += 1
+                elif new_status == "live" and match.status == "scheduled":
+                    match.status = "live"
+                    updated += 1
 
-            # Upsert odds — add new snapshot
-            for o in ev.get("odds", []):
-                db.add(MatchOdds(
-                    match_id=match.id,
-                    bookmaker=o["bookmaker"],
-                    market=o["market"],
-                    outcome=o["outcome"],
-                    price=o["price"],
-                    point=o.get("point"),
-                ))
+            # Attach fresh odds snapshots for upcoming/live matches
+            if ev.get("status") in ("scheduled", "live") and ev.get("odds"):
+                for o in ev["odds"]:
+                    db.add(MatchOdds(
+                        match_id  = match.id,
+                        bookmaker = o["bookmaker"],
+                        market    = o["market"],
+                        outcome   = o["outcome"],
+                        price     = o["price"],
+                        point     = o.get("point"),
+                    ))
+
         except Exception as e:
-            logger.warning(f"Ingest error for {ev.get('external_id')}: {e}")
+            logger.warning(f"Ingest error [{ev.get('external_id', '?')}]: {e}")
             db.rollback()
             continue
 
     db.commit()
-    return saved
+    return saved, updated
 
+
+# ── Live fetch (runs every 6 hours via scheduler) ─────────────────────
 
 def run_live_fetch():
-    """Pull latest odds from Sportybet + Odds API."""
-    sb = SportybetClient()
-    oa = OddsAPIClient()
+    """
+    Pull latest upcoming fixtures + odds from Sportybet and The Odds API.
+    This is the routine fetch that keeps upcoming matches up to date.
+    """
+    from data.sources.sportybet import SportybetClient
+    from data.sources.odds_api  import OddsAPIClient
 
-    sb_events = sb.get_all_sports(hours_ahead=72)
-    oa_events = oa.fetch_all()
+    sb_events = []
+    oa_events = []
+
+    # Sportybet — no key required
+    try:
+        sb = SportybetClient()
+        sb_events = sb.get_all_sports(hours_ahead=168)   # 7 days ahead
+        logger.info(f"Sportybet: {len(sb_events)} upcoming matches")
+    except Exception as e:
+        logger.error(f"Sportybet fetch error: {e}")
+
+    # Odds API — requires key
+    try:
+        oa = OddsAPIClient()
+        oa_events = oa.fetch_all()
+        logger.info(f"Odds API: {len(oa_events)} matches")
+    except Exception as e:
+        logger.error(f"Odds API fetch error: {e}")
+
     all_events = sb_events + oa_events
 
     with get_sync_session() as db:
-        saved = ingest_events(db, all_events)
-    logger.info(f"Live fetch: {saved} new matches ingested")
+        saved, updated = ingest_events(db, all_events)
+    logger.info(f"Live fetch complete — {saved} new, {updated} updated")
 
 
-def seed_demo_data():
+# ── Historical load (one-time setup) ─────────────────────────────────
+
+def run_historical_load():
     """
-    Seed realistic demo data for all sports so the app works without API keys.
-    Generates ~3 seasons of historical results + upcoming fixtures with odds.
+    Download and ingest complete historical match data from free sources:
+      - football-data.co.uk CSVs  (11 leagues × 4 seasons)
+      - Jeff Sackmann ATP/WTA     (2020–2025)
+      - NBA official stats API    (2021–22 through 2024–25)
+
+    This should be run once during production setup to build training data
+    for the ML models. Takes ~5–10 minutes depending on network speed.
     """
-    random.seed(42)
+    from data.loaders.football_csv  import download_all_historical as load_football
+    from data.loaders.tennis_loader import fetch_all_tennis_historical as load_tennis
+    from data.loaders.nba_loader    import fetch_all_nba_historical    as load_nba
 
-    def poisson_goal(lam):
-        L = math.exp(-lam); k, p = 0, 1.0
-        while p > L:
-            k += 1; p *= random.random()
-        return k - 1
+    total_saved = total_updated = 0
 
-    def sim_match(h_elo, a_elo):
-        lam_h = max(0.4, min(4.0, 1.3 * (h_elo + 100) / 1500))
-        lam_a = max(0.4, min(4.0, 1.3 * a_elo / 1500))
-        return poisson_goal(lam_h), poisson_goal(lam_a)
+    # 1. Football
+    logger.info("=== Loading football historical data ===")
+    football_events = load_football()
+    with get_sync_session() as db:
+        s, u = ingest_events(db, football_events)
+    logger.info(f"Football: {s} saved, {u} updated")
+    total_saved += s; total_updated += u
 
-    FOOTBALL_TEAMS = [
-        ("Manchester City", 1820), ("Arsenal", 1780), ("Liverpool", 1760),
-        ("Chelsea", 1680), ("Tottenham", 1660), ("Newcastle", 1640),
-        ("Man Utd", 1600), ("Aston Villa", 1580), ("West Ham", 1540),
-        ("Brighton", 1530), ("Wolves", 1510), ("Fulham", 1490),
-        ("Brentford", 1480), ("Crystal Palace", 1460), ("Everton", 1450),
-        ("Bournemouth", 1440), ("Nottm Forest", 1420), ("Luton", 1390),
-        ("Burnley", 1380), ("Sheffield Utd", 1360),
-        # La Liga
-        ("Real Madrid", 1900), ("Barcelona", 1860), ("Atletico Madrid", 1810),
-        ("Sevilla", 1680), ("Real Sociedad", 1650), ("Villarreal", 1630),
-        # Bundesliga
-        ("Bayern Munich", 1880), ("Borussia Dortmund", 1780), ("RB Leipzig", 1740),
-        ("Bayer Leverkusen", 1720), ("Eintracht Frankfurt", 1640),
-        # Serie A
-        ("Inter Milan", 1820), ("AC Milan", 1800), ("Juventus", 1780),
-        ("Napoli", 1760), ("AS Roma", 1700), ("Lazio", 1680),
-        # Nigeria
-        ("Enyimba FC", 1540), ("Kano Pillars", 1530), ("Rivers United", 1520),
-        ("Plateau United", 1500), ("Remo Stars", 1490),
-    ]
+    # 2. Tennis
+    logger.info("=== Loading tennis historical data ===")
+    tennis_events = load_tennis()
+    with get_sync_session() as db:
+        s, u = ingest_events(db, tennis_events)
+    logger.info(f"Tennis: {s} saved, {u} updated")
+    total_saved += s; total_updated += u
 
-    BASKETBALL_TEAMS = [
-        ("Boston Celtics", 1820), ("Denver Nuggets", 1800), ("Milwaukee Bucks", 1780),
-        ("Phoenix Suns", 1760), ("LA Lakers", 1750), ("Golden State Warriors", 1740),
-        ("Miami Heat", 1720), ("Philadelphia 76ers", 1710), ("LA Clippers", 1700),
-        ("Dallas Mavericks", 1690), ("Memphis Grizzlies", 1680), ("Cleveland Cavaliers", 1670),
-    ]
+    # 3. NBA
+    logger.info("=== Loading NBA historical data ===")
+    nba_events = load_nba()
+    with get_sync_session() as db:
+        s, u = ingest_events(db, nba_events)
+    logger.info(f"NBA: {s} saved, {u} updated")
+    total_saved += s; total_updated += u
 
-    TENNIS_PLAYERS = [
-        ("Novak Djokovic", 1950), ("Carlos Alcaraz", 1880), ("Jannik Sinner", 1860),
-        ("Daniil Medvedev", 1840), ("Alexander Zverev", 1800), ("Holger Rune", 1760),
-        ("Casper Ruud", 1750), ("Stefanos Tsitsipas", 1740), ("Andrey Rublev", 1720),
-        ("Taylor Fritz", 1700), ("Frances Tiafoe", 1680), ("Ben Shelton", 1660),
-    ]
+    logger.info(f"Historical load complete — {total_saved} new, {total_updated} updated")
+    return total_saved
 
-    LEAGUES = {
-        "football": [
-            ("Premier League", "England", FOOTBALL_TEAMS[:20]),
-            ("La Liga", "Spain", FOOTBALL_TEAMS[20:26] + FOOTBALL_TEAMS[:14]),
-            ("Bundesliga", "Germany", FOOTBALL_TEAMS[26:31] + FOOTBALL_TEAMS[:15]),
-            ("Serie A", "Italy", FOOTBALL_TEAMS[31:37] + FOOTBALL_TEAMS[:14]),
-            ("Nigeria NPFL", "Nigeria", FOOTBALL_TEAMS[37:42] + FOOTBALL_TEAMS[:15]),
-            ("UEFA Champions League", "Europe", FOOTBALL_TEAMS[:8] + FOOTBALL_TEAMS[20:28]),
-        ],
-        "basketball": [
-            ("NBA", "USA", BASKETBALL_TEAMS),
-        ],
-        "tennis": [
-            ("ATP Tour", "International", TENNIS_PLAYERS),
-        ],
-    }
+
+# ── Full season fetch (API-Football) ─────────────────────────────────
+
+def run_full_season_fetch():
+    """
+    Fetch the entire current season schedule from API-Football.
+    Includes both played (with results) and upcoming fixtures.
+    Requires API_FOOTBALL_KEY in .env.
+    """
+    from data.sources.api_football import APIFootballClient
+    client = APIFootballClient()
+
+    if not client.key:
+        logger.warning("API_FOOTBALL_KEY not set — skipping full season fetch")
+        return 0
+
+    logger.info("=== Fetching full current season from API-Football ===")
+    events = client.fetch_all_current_season()
 
     with get_sync_session() as db:
-        for sport_key, leagues in LEAGUES.items():
-            sport = _get_or_create_sport(db, sport_key)
+        saved, updated = ingest_events(db, events)
 
-            for league_name, country, teams in leagues:
-                comp = _get_or_create_competition(db, sport, league_name, country)
-                participants = [_get_or_create_participant(db, sport, name) for name, _ in teams]
-                elos = {name: elo for name, elo in teams}
-
-                # 3 seasons of historical matches
-                season_start = datetime(2021, 9, 1)
-                for season_idx in range(3):
-                    season_date = season_start + timedelta(days=365 * season_idx)
-                    rounds = 30 if sport_key == "football" else 20
-                    matches_per_round = len(participants) // 2
-
-                    for rnd in range(1, rounds + 1):
-                        round_date = season_date + timedelta(days=7 * (rnd - 1) + random.randint(0, 2))
-                        indices = list(range(len(participants)))
-                        random.shuffle(indices)
-                        pairs = [(indices[i], indices[i+1]) for i in range(0, len(indices) - 1, 2)]
-
-                        for hi, ai in pairs:
-                            h = participants[hi]; a = participants[ai]
-                            h_elo = elos.get(h.name, 1500); a_elo = elos.get(a.name, 1500)
-                            ext_id = f"demo_{sport_key}_{season_idx}_{rnd}_{h.id}_{a.id}"
-                            if db.query(Match).filter_by(external_id=ext_id).first():
-                                continue
-
-                            hs, as_ = sim_match(h_elo, a_elo)
-                            result = "H" if hs > as_ else ("A" if as_ > hs else "D")
-                            m = Match(
-                                external_id=ext_id,
-                                competition_id=comp.id,
-                                home_id=h.id, away_id=a.id,
-                                match_date=round_date,
-                                status="finished",
-                                home_score=hs, away_score=as_, result=result,
-                            )
-                            db.add(m)
-
-                db.commit()
-                logger.info(f"Seeded historical: {league_name}")
-
-                # Upcoming fixtures with odds (next 7 days)
-                bookmakers = ["sportybet", "bet365", "betway", "1xbet", "betking"]
-                indices = list(range(len(participants)))
-                random.shuffle(indices)
-                pairs = [(indices[i], indices[i+1]) for i in range(0, min(len(indices)-1, 16), 2)]
-
-                for k, (hi, ai) in enumerate(pairs):
-                    h = participants[hi]; a = participants[ai]
-                    h_elo = elos.get(h.name, 1500); a_elo = elos.get(a.name, 1500)
-                    match_date = datetime.utcnow() + timedelta(days=k % 5, hours=random.randint(12, 21))
-                    ext_id = f"upcoming_{sport_key}_{h.id}_{a.id}_2024"
-                    if db.query(Match).filter_by(external_id=ext_id).first():
-                        continue
-
-                    m = Match(
-                        external_id=ext_id, competition_id=comp.id,
-                        home_id=h.id, away_id=a.id,
-                        match_date=match_date, status="scheduled",
-                    )
-                    db.add(m); db.flush()
-
-                    # Generate realistic odds
-                    from features.elo import win_probabilities
-                    probs = win_probabilities(h_elo, a_elo, has_draw=(sport_key == "football"))
-                    margin = 0.06
-                    h_odds = max(1.05, round((1 / probs["home"]) * (1 - margin) + random.uniform(-0.05, 0.15), 2))
-                    a_odds = max(1.05, round((1 / probs["away"]) * (1 - margin) + random.uniform(-0.05, 0.15), 2))
-
-                    for bm in bookmakers:
-                        noise = lambda x: max(1.05, round(x + random.uniform(-0.06, 0.06), 2))
-                        db.add(MatchOdds(match_id=m.id, bookmaker=bm, market="h2h", outcome="home", price=noise(h_odds)))
-                        db.add(MatchOdds(match_id=m.id, bookmaker=bm, market="h2h", outcome="away", price=noise(a_odds)))
-                        if sport_key == "football":
-                            d_prob = probs.get("draw", 0.26)
-                            d_odds = max(2.4, round((1 / d_prob) * (1 - margin) + random.uniform(-0.1, 0.2), 2))
-                            db.add(MatchOdds(match_id=m.id, bookmaker=bm, market="h2h", outcome="draw", price=noise(d_odds)))
-                            db.add(MatchOdds(match_id=m.id, bookmaker=bm, market="totals", outcome="over", price=round(random.uniform(1.70, 2.10), 2), point=2.5))
-                            db.add(MatchOdds(match_id=m.id, bookmaker=bm, market="totals", outcome="under", price=round(random.uniform(1.70, 2.10), 2), point=2.5))
-                            db.add(MatchOdds(match_id=m.id, bookmaker=bm, market="btts", outcome="yes", price=round(random.uniform(1.65, 1.95), 2)))
-                            db.add(MatchOdds(match_id=m.id, bookmaker=bm, market="btts", outcome="no", price=round(random.uniform(1.80, 2.10), 2)))
-                        elif sport_key == "basketball":
-                            db.add(MatchOdds(match_id=m.id, bookmaker=bm, market="totals", outcome="over", price=round(random.uniform(1.85, 1.95), 2), point=220.5))
-                            db.add(MatchOdds(match_id=m.id, bookmaker=bm, market="totals", outcome="under", price=round(random.uniform(1.85, 1.95), 2), point=220.5))
-
-                db.commit()
-                logger.info(f"Seeded upcoming fixtures: {league_name}")
-
-    logger.info("Demo data seeding complete.")
+    logger.info(f"Full season fetch complete — {saved} new, {updated} updated")
+    return saved

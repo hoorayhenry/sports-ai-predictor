@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { Sport, Competition, Match, ValueBet, MatchDecision, SmartSet, PerformanceStats } from "./types";
+import type { Sport, Competition, Match, ValueBet, MatchDecision, SmartSet, PerformanceStats, PredictionHistory } from "./types";
 
 const BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000/api/v1";
 
@@ -49,3 +49,7 @@ export const fetchPerformance = (sport?: string, days?: number) =>
 
 export const triggerDecisionsNow = (sendEmail = false) =>
   api.post("/decisions/run-now", null, { params: { send_email: sendEmail } }).then((r) => r.data);
+
+export const fetchPredictionHistory = (params?: {
+  sport?: string; days?: number; decision?: string; limit?: number;
+}) => api.get<PredictionHistory[]>("/decisions/history", { params }).then((r) => r.data);

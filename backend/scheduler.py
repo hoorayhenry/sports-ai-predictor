@@ -169,14 +169,17 @@ def job_daily_decisions():
 
 
 def job_resolve_matches():
-    """Check finished matches and log performance."""
-    logger.info("[SCHEDULER] Resolving finished matches...")
+    """
+    Fetch real match results from APIs, mark finished, log performance.
+    Runs every 2 hours.
+    """
+    logger.info("[SCHEDULER] Resolving finished matches + fetching real results...")
     try:
         from data.database import get_sync_session
         from betting.decision_engine import resolve_finished_matches
 
         with get_sync_session() as db:
-            n = resolve_finished_matches(db)
+            n = resolve_finished_matches(db)   # internally calls results_fetcher
         logger.info(f"[SCHEDULER] Resolved {n} matches")
     except Exception as e:
         logger.error(f"[SCHEDULER] Resolve job failed: {e}")

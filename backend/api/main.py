@@ -23,25 +23,25 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialised.")
 
-    # Auto-seed demo data if DB is empty
+    # On empty DB: fetch real live fixtures from Sportybet + Odds API.
+    # Full historical load (CSV + NBA + ATP) must be run separately via:
+    #   python scripts/setup.py
     try:
         from data.database import get_sync_session
         from data.db_models.models import Match
         with get_sync_session() as db:
             count = db.query(Match).count()
         if count == 0:
-            logger.info("Empty database — seeding demo data...")
-            from data.pipeline import seed_demo_data
-            from features.elo import rebuild_elo
-            seed_demo_data()
+            logger.info("Empty database — fetching real fixtures from Sportybet + Odds API...")
+            from data.pipeline import run_live_fetch
+            run_live_fetch()
             with get_sync_session() as db:
-                for sport_key in ["football", "basketball", "tennis"]:
-                    rebuild_elo(db, sport_key)
-            logger.info("Demo data seeded and ELO rebuilt.")
+                new_count = db.query(Match).count()
+            logger.info(f"Initial fetch complete — {new_count} matches loaded.")
         else:
-            logger.info(f"Database has {count} matches — skipping seed.")
+            logger.info(f"Database has {count} matches.")
     except Exception as e:
-        logger.error(f"Seed/init error: {e}")
+        logger.error(f"Initial data fetch error: {e}")
 
     # Auto-train models if not present
     try:

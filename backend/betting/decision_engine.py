@@ -378,11 +378,21 @@ def generate_smart_sets(db: Session) -> list[SmartSet]:
 
 def resolve_finished_matches(db: Session) -> int:
     """
-    Find finished matches that have predictions+decisions but no perf log.
-    Create PerformanceLog rows and update SmartSet win/loss counts.
+    1. Fetch real results from The Odds API / API-Football and update Match records.
+    2. Find matches that are now finished, have a prediction+decision, but no PerformanceLog.
+    3. Create PerformanceLog rows (win/loss, P&L) and trigger self-optimization.
     Returns number of newly resolved matches.
     """
     from sqlalchemy.orm import joinedload
+
+    # ── Step 1: pull real results from external APIs ──────────────────
+    try:
+        from data.sources.results_fetcher import fetch_and_update_results
+        n_updated = fetch_and_update_results(db)
+        if n_updated:
+            logger.info(f"Result fetcher: {n_updated} matches updated to finished")
+    except Exception as e:
+        logger.warning(f"Result fetcher error (non-fatal): {e}")
 
     resolved = 0
 

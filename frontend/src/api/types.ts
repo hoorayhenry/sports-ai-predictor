@@ -136,6 +136,30 @@ export interface PerformanceStats {
   top_competitions: { competition: string; win_rate: number; sample: number }[];
 }
 
+export interface PredictionHistory {
+  match_id: number;
+  sport: string;
+  sport_icon: string;
+  competition: string;
+  home_team: string;
+  away_team: string;
+  match_date: string | null;
+  // Prediction
+  ai_decision: "PLAY" | "SKIP";
+  confidence_score: number;
+  predicted_outcome: string;
+  predicted_outcome_label: string;
+  predicted_prob: number | null;
+  recommended_odds: number | null;
+  // Actual result
+  actual_result: string;
+  actual_result_label: string;
+  // Outcome
+  is_correct: boolean;
+  profit_loss_units: number;
+  resolved_at: string;
+}
+
 export interface ValueBet {
   match_id: number;
   sport: string;
