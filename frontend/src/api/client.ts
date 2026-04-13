@@ -11,12 +11,24 @@ export const fetchSports = () =>
 export const fetchCompetitions = (sportKey: string) =>
   api.get<Competition[]>(`/sports/${sportKey}/competitions`).then((r) => r.data);
 
+export interface MatchPage {
+  matches: Match[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+}
+
 export const fetchMatches = (params: {
   sport?: string;
   competition_id?: number;
   status?: string;
   days?: number;
-}) => api.get<Match[]>("/matches", { params }).then((r) => r.data);
+  date_from?: string;
+  date_to?: string;
+  limit?: number;
+  offset?: number;
+}) => api.get<MatchPage>("/matches", { params }).then((r) => r.data);
 
 export const fetchMatch = (id: number) =>
   api.get<Match>(`/matches/${id}`).then((r) => r.data);

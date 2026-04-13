@@ -1,0 +1,36 @@
+<svg width="100%" viewBox="0 0 680 470" role="img" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="46%" r="55%"><stop offset="0%" stop-color="#0d1b3e"/><stop offset="100%" stop-color="#04060f"/></radialGradient>
+    <radialGradient id="ballG" cx="40%" cy="36%" r="62%"><stop offset="0%" stop-color="#5ec8f5"/><stop offset="50%" stop-color="#1040a0"/><stop offset="100%" stop-color="#020b2e"/></radialGradient>
+    <radialGradient id="coreG" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#00e5ff" stop-opacity="0.9"/><stop offset="100%" stop-color="#0d47a1" stop-opacity="0"/></radialGradient>
+    <linearGradient id="hoorayGrad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#ffffff"/><stop offset="40%" stop-color="#e0f7ff"/><stop offset="100%" stop-color="#7ec8e3"/></linearGradient>
+    <linearGradient id="henryGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#00e5ff"/><stop offset="50%" stop-color="#18ffff"/><stop offset="100%" stop-color="#00b0ff"/></linearGradient>
+    <filter id="letterGlow" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation="4" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="cyanGlow" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="7" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="ballGlow" x="-25%" y="-25%" width="150%" height="150%"><feGaussianBlur stdDeviation="8" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <clipPath id="bclip"><circle cx="340" cy="185" r="98"/></clipPath>
+  </defs>
+  <rect width="680" height="460" rx="20" fill="url(#bg)"/>
+  <circle cx="340" cy="185" r="98" fill="url(#ballG)" filter="url(#ballGlow)"/>
+  <g clip-path="url(#bclip)" fill="none" stroke="#1040a0" stroke-width="1.6" opacity="0.65">
+    <polygon points="340,128 367,147 357,180 323,180 313,147" fill="#051440" stroke="#1565c0" stroke-width="1.2"/>
+    <path d="M313,147 Q284,133 273,162"/><path d="M273,162 Q261,195 280,218"/><path d="M280,218 Q298,242 323,237"/>
+    <path d="M323,237 Q340,247 357,237"/><path d="M357,237 Q382,242 400,218"/><path d="M400,218 Q419,195 407,162"/>
+    <path d="M407,162 Q396,133 367,147"/><path d="M313,147 Q304,120 323,107"/><path d="M323,107 Q340,97 357,107"/>
+    <path d="M357,107 Q376,120 367,147"/>
+  </g>
+  <g clip-path="url(#bclip)" stroke="#00e5ff" stroke-width="1.1" fill="none" opacity="0.5">
+    <path d="M292,162 Q278,172 274,187 Q272,202 283,212"/><path d="M388,162 Q402,172 406,187 Q408,202 397,212"/>
+    <circle cx="292" cy="162" r="3" fill="#00e5ff"/><circle cx="388" cy="162" r="3" fill="#00e5ff"/>
+  </g>
+  <g filter="url(#cyanGlow)">
+    <polygon points="347,144 332,184 343,184 328,228 358,180 346,180 360,144" fill="#00e5ff" opacity="0.95"/>
+  </g>
+  <circle cx="340" cy="185" r="98" fill="none" stroke="#4fc3f7" stroke-width="1.2" opacity="0.5"/>
+  <text x="343" y="360" text-anchor="middle" font-family="Arial Black,sans-serif" font-size="72" letter-spacing="10" fill="#003d6b" opacity="0.6">HOORAY</text>
+  <text x="340" y="357" text-anchor="middle" font-family="Arial Black,sans-serif" font-size="72" letter-spacing="10" fill="url(#hoorayGrad)" filter="url(#letterGlow)">HOORAY</text>
+  <rect x="218" y="362" width="244" height="3" rx="1.5" fill="#00e5ff" opacity="0.6"/>
+  <text x="343" y="416" text-anchor="middle" font-family="Arial Black,sans-serif" font-size="88" letter-spacing="18" fill="#003a50" opacity="0.55">HENRY</text>
+  <text x="340" y="413" text-anchor="middle" font-family="Arial Black,sans-serif" font-size="88" letter-spacing="18" fill="url(#henryGrad)" filter="url(#cyanGlow)">HENRY</text>
+  <text x="340" y="440" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="400" letter-spacing="5" fill="#4fc3f7" opacity="0.7">AI · MATCH · PREDICTION</text>
+</svg>

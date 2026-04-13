@@ -28,7 +28,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import sys
 from loguru import logger
+logger.remove()
+logger.add(sys.stdout, level="DEBUG", colorize=True, format="<green>{time:HH:mm:ss}</green> | <level>{level:<7}</level> | {message}")
 
 
 def main():

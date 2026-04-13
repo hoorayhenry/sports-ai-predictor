@@ -1,0 +1,114 @@
+name: Build → ECR → Deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION:       us-east-2
+  ECR_REGISTRY:     594474085976.dkr.ecr.us-east-2.amazonaws.com
+  BACKEND_REPO:     ai-prediction/backend
+  FRONTEND_REPO:    ai-prediction/frontend
+
+jobs:
+  build-and-push:
+    name: Build & Push to ECR
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image tag (short SHA)
+        id: tag
+        run: echo "tag=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Backend ─────────────────────────────────────────────────────
+      - name: Build & push backend
+        uses: docker/build-push-action@v5
+        with:
+          context:   ./backend
+          file:      ./backend/Dockerfile
+          push:      true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:${{ steps.tag.outputs.tag }}
+            ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:latest
+          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:latest
+          cache-to:   type=inline
+
+      # ── Frontend ─────────────────────────────────────────────────────
+      - name: Build & push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context:   ./frontend
+          file:      ./frontend/Dockerfile
+          push:      true
+          build-args: VITE_API_URL=/api/v1
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_REPO }}:${{ steps.tag.outputs.tag }}
+            ${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_REPO }}:latest
+          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_REPO }}:latest
+          cache-to:   type=inline
+
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          script: |
+            set -e
+
+            IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+            ECR_REGISTRY="594474085976.dkr.ecr.us-east-2.amazonaws.com"
+
+            cd /opt/sports-ai
+
+            # Pull latest code (compose files, nginx config, deploy scripts)
+            git pull origin main
+
+            # ECR login using AWS credentials (injected as env by GitHub Actions)
+            AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" \
+            AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+            AWS_DEFAULT_REGION="us-east-2" \
+            aws ecr get-login-password --region us-east-2 \
+              | docker login --username AWS --password-stdin \
+                594474085976.dkr.ecr.us-east-2.amazonaws.com
+
+            # Pull new images
+            IMAGE_TAG="$IMAGE_TAG" docker compose -f docker-compose.prod.yml pull
+
+            # Update frontend static files from the new image
+            docker run --rm \
+              -v sports-ai_frontend_dist:/shared \
+              ${ECR_REGISTRY}/ai-prediction/frontend:${IMAGE_TAG} \
+              sh -c "cp -r /dist/. /shared/ && echo 'Frontend files updated'"
+
+            # Restart — 2 backend replicas behind nginx
+            IMAGE_TAG="$IMAGE_TAG" docker compose -f docker-compose.prod.yml up -d \
+              --remove-orphans \
+              --scale backend=2
+
+            docker compose -f docker-compose.prod.yml ps
+            echo "Deploy complete — image: ${IMAGE_TAG}"

@@ -1,0 +1,43 @@
+version: "3.9"
+
+# Production compose — uses pre-built ECR images
+# Run with: docker compose -f docker-compose.prod.yml up -d --scale backend=2
+
+services:
+
+  backend:
+    image: 594474085976.dkr.ecr.us-east-2.amazonaws.com/ai-prediction/backend:${IMAGE_TAG:-latest}
+    env_file: ./backend/.env
+    expose:
+      - "8000"
+    volumes:
+      - db_data:/data
+      - ml_models:/app/ml/saved
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - frontend_dist:/usr/share/nginx/html:ro
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - certbot_certs:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  ml_models:
+  frontend_dist:
+  certbot_certs:
+  certbot_www:

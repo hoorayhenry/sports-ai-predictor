@@ -64,10 +64,57 @@ async def list_matches(
     competition_id: Optional[int] = Query(None),
     status: Optional[str] = Query("scheduled"),
     days: int = Query(7),
+    date_from: Optional[str] = Query(None, description="ISO date YYYY-MM-DD"),
+    date_to: Optional[str] = Query(None, description="ISO date YYYY-MM-DD"),
+    limit: int = Query(30, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_async_session),
 ):
-    q = (
+    from sqlalchemy import func as sqlfunc
+
+    base_q = (
         select(Match)
+        .join(Competition, Match.competition_id == Competition.id)
+        .join(Sport, Competition.sport_id == Sport.id)
+    )
+
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Date range: explicit range takes priority over days filter
+    if date_from or date_to:
+        if date_from:
+            base_q = base_q.where(Match.match_date >= datetime.fromisoformat(date_from))
+        if date_to:
+            # Include full day
+            dt_to = datetime.fromisoformat(date_to).replace(hour=23, minute=59, second=59)
+            base_q = base_q.where(Match.match_date <= dt_to)
+        if status == "scheduled":
+            base_q = base_q.where(Match.status == "scheduled")
+    elif status == "scheduled":
+        cutoff = today_start + timedelta(days=days)
+        base_q = base_q.where(
+            Match.status == "scheduled",
+            Match.match_date >= today_start,
+            Match.match_date <= cutoff,
+        )
+    elif status == "finished":
+        base_q = base_q.where(Match.result.isnot(None))
+    elif status:
+        base_q = base_q.where(Match.status == status)
+
+    if sport:
+        base_q = base_q.where(Sport.key == sport)
+    if competition_id:
+        base_q = base_q.where(Match.competition_id == competition_id)
+
+    # Count total for pagination
+    count_q = select(sqlfunc.count()).select_from(base_q.subquery())
+    total_res = await db.execute(count_q)
+    total = total_res.scalar_one()
+
+    # Fetch page
+    q = (
+        base_q
         .options(
             selectinload(Match.home),
             selectinload(Match.away),
@@ -75,24 +122,10 @@ async def list_matches(
             selectinload(Match.predictions),
             selectinload(Match.odds),
         )
-        .join(Competition, Match.competition_id == Competition.id)
-        .join(Sport, Competition.sport_id == Sport.id)
         .order_by(Match.match_date)
+        .offset(offset)
+        .limit(limit)
     )
-
-    if status == "scheduled":
-        cutoff = datetime.utcnow() + timedelta(days=days)
-        q = q.where(Match.status == "scheduled", Match.match_date >= datetime.utcnow(),
-                    Match.match_date <= cutoff)
-    elif status == "finished":
-        q = q.where(Match.result.isnot(None))
-    elif status:
-        q = q.where(Match.status == status)
-
-    if sport:
-        q = q.where(Sport.key == sport)
-    if competition_id:
-        q = q.where(Match.competition_id == competition_id)
 
     result = await db.execute(q)
     matches = result.scalars().all()
@@ -101,7 +134,14 @@ async def list_matches(
     for m in matches:
         pred = m.predictions[0] if m.predictions else None
         out.append(_fmt_match(m, list(m.odds), pred))
-    return out
+
+    return {
+        "matches": out,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": (offset + limit) < total,
+    }
 
 
 @router.get("/{match_id}")

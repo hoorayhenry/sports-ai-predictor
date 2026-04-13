@@ -1,5 +1,6 @@
 import { Routes, Route } from "react-router-dom";
 import Navbar from "./components/Navbar";
+import Footer from "./components/Footer";
 import HomePage from "./pages/HomePage";
 import DailyPicksPage from "./pages/DailyPicksPage";
 import SmartSetsPage from "./pages/SmartSetsPage";
@@ -9,9 +10,9 @@ import MatchDetailPage from "./pages/MatchDetailPage";
 
 export default function App() {
   return (
-    <div className="max-w-4xl mx-auto">
+    <div className="min-h-screen flex flex-col max-w-7xl mx-auto">
       <Navbar />
-      <main className="md:pt-2">
+      <main className="flex-1 md:pt-2">
         <Routes>
           <Route path="/"            element={<HomePage />} />
           <Route path="/picks"       element={<DailyPicksPage />} />
@@ -21,6 +22,7 @@ export default function App() {
           <Route path="/match/:id"   element={<MatchDetailPage />} />
         </Routes>
       </main>
+      <Footer />
     </div>
   );
 }

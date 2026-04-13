@@ -1,7 +1,6 @@
-"""Odds API fallback client — supplements Sportybet when key is configured."""
+"""Odds API client — fetches real upcoming fixtures with odds."""
 import time
 from datetime import datetime
-from typing import Optional
 import httpx
 from loguru import logger
 from config.settings import get_settings
@@ -9,26 +8,30 @@ from config.settings import get_settings
 settings = get_settings()
 BASE = "https://api.the-odds-api.com/v4"
 
-SPORT_KEYS = [
-    # Football
-    "soccer_epl", "soccer_spain_la_liga", "soccer_germany_bundesliga",
-    "soccer_italy_serie_a", "soccer_france_ligue_one", "soccer_uefa_champs_league",
-    "soccer_uefa_europa_league", "soccer_nigeria_npfl", "soccer_africa_cup_of_nations",
-    "soccer_conmebol_copa_libertadores", "soccer_brazil_campeonato",
-    "soccer_argentina_primera_division", "soccer_mls",
-    # Basketball
-    "basketball_nba", "basketball_ncaab", "basketball_euroleague",
-    # Tennis
-    "tennis_atp_french_open", "tennis_wta_french_open",
-    "tennis_atp_us_open", "tennis_wta_us_open",
-    "tennis_atp_wimbledon", "tennis_atp_australian_open",
-    # American Football
-    "americanfootball_nfl",
-]
-
 SPORT_CATEGORY = {
-    "soccer_": "football", "basketball_": "basketball",
-    "tennis_": "tennis", "americanfootball_": "american_football",
+    "soccer_":          "football",
+    "basketball_":      "basketball",
+    "tennis_":          "tennis",
+    "americanfootball_":"american_football",
+    "icehockey_":       "ice_hockey",
+    "baseball_":        "baseball",
+    "rugbyleague_":     "rugby",
+    "rugbyunion_":      "rugby",
+    "volleyball_":      "volleyball",
+    "cricket_":         "cricket",
+}
+
+# Markets that work for each sport category (btts/totals cause 422 on many sports)
+SPORT_MARKETS = {
+    "football":         "h2h,totals",
+    "basketball":       "h2h,spreads",
+    "tennis":           "h2h",
+    "american_football":"h2h,spreads",
+    "ice_hockey":       "h2h,totals",
+    "baseball":         "h2h,spreads",
+    "rugby":            "h2h",
+    "volleyball":       "h2h",
+    "cricket":          "h2h",
 }
 
 
@@ -37,27 +40,57 @@ class OddsAPIClient:
         self.key = settings.odds_api_key
         self.remaining = 500
 
+    def _active_sports(self) -> list[dict]:
+        """Fetch currently active (in-season) sports from the API."""
+        try:
+            with httpx.Client(timeout=15) as c:
+                resp = c.get(f"{BASE}/sports", params={"apiKey": self.key, "all": "false"})
+                resp.raise_for_status()
+                return resp.json()
+        except Exception as e:
+            logger.warning(f"Odds API /sports: {e}")
+            return []
+
     def fetch_all(self) -> list[dict]:
         if not self.key:
             return []
+
+        active = self._active_sports()
+        if not active:
+            logger.warning("Odds API: no active sports returned")
+            return []
+
+        logger.info(f"Odds API: {len(active)} active sports found")
         all_events = []
-        for sport_key in SPORT_KEYS:
+        for sport in active:
+            sport_key = sport.get("key", "")
             sport_cat = next((v for k, v in SPORT_CATEGORY.items() if sport_key.startswith(k)), "other")
-            events = self._get_odds(sport_key, sport_cat)
+            if sport_cat == "other":
+                continue
+            markets = SPORT_MARKETS.get(sport_cat, "h2h")
+            events = self._get_odds(sport_key, sport_cat, markets)
+            if events:
+                logger.info(f"  {sport_key}: {len(events)} upcoming matches")
             all_events.extend(events)
-            time.sleep(0.3)
+            time.sleep(0.25)
+
+        logger.info(f"Odds API total: {len(all_events)} upcoming matches")
         return all_events
 
-    def _get_odds(self, sport_key: str, sport_cat: str) -> list[dict]:
+    def _get_odds(self, sport_key: str, sport_cat: str, markets: str = "h2h") -> list[dict]:
         try:
             with httpx.Client(timeout=15) as c:
                 resp = c.get(f"{BASE}/sports/{sport_key}/odds", params={
                     "apiKey": self.key,
                     "regions": "eu,uk,us",
-                    "markets": "h2h,totals,btts",
+                    "markets": markets,
                     "oddsFormat": "decimal",
                 })
-                self.remaining = int(resp.headers.get("x-requests-remaining", self.remaining))
+                remaining = resp.headers.get("x-requests-remaining")
+                if remaining:
+                    self.remaining = int(remaining)
+                    if self.remaining < 20:
+                        logger.warning(f"Odds API: only {self.remaining} requests remaining this month!")
                 resp.raise_for_status()
                 events = resp.json()
         except Exception as e:
@@ -83,18 +116,18 @@ class OddsAPIClient:
                             ok = "over"
                         elif "under" in n:
                             ok = "under"
-                        elif n in ("yes",):
+                        elif n == "yes":
                             ok = "yes"
-                        elif n in ("no",):
+                        elif n == "no":
                             ok = "no"
                         else:
                             ok = n
                         odds_list.append({
                             "bookmaker": bm["key"],
-                            "market": mkt["key"],
-                            "outcome": ok,
-                            "price": float(o["price"]),
-                            "point": o.get("point"),
+                            "market":    mkt["key"],
+                            "outcome":   ok,
+                            "price":     float(o["price"]),
+                            "point":     o.get("point"),
                         })
 
             try:
@@ -104,13 +137,13 @@ class OddsAPIClient:
 
             results.append({
                 "external_id": f"oa_{ev['id']}",
-                "sport": sport_cat,
+                "sport":       sport_cat,
                 "competition": ev.get("sport_title", sport_key),
-                "country": "",
-                "home_name": home,
-                "away_name": away,
-                "match_date": start,
-                "status": "scheduled",
-                "odds": odds_list,
+                "country":     "",
+                "home_name":   home,
+                "away_name":   away,
+                "match_date":  start,
+                "status":      "scheduled",
+                "odds":        odds_list,
             })
         return results

@@ -109,6 +109,8 @@ def _auto_predict():
     from sqlalchemy.orm import joinedload
 
     with get_sync_session() as db:
+        # Only predict matches that don't already have a prediction
+        predicted_ids = {p.match_id for p in db.query(Prediction.match_id).all()}
         matches = (
             db.query(Match)
             .join(Competition)
@@ -121,8 +123,10 @@ def _auto_predict():
             .filter(Match.status == "scheduled")
             .all()
         )
+        unpredicted = [m for m in matches if m.id not in predicted_ids]
+        logger.info(f"Auto-predict: {len(unpredicted)} new matches to predict (skipping {len(predicted_ids)} already done)")
 
-        for m in matches:
+        for m in unpredicted:
             try:
                 sport_key = m.competition.sport.key if m.competition and m.competition.sport else None
                 if not sport_key:

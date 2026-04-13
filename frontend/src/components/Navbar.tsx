@@ -1,5 +1,6 @@
 import { Link, useLocation } from "react-router-dom";
 import { Home, Flame, Target, BarChart2, History } from "lucide-react";
+import logoUrl from "../assets/hoorayhenry-logo.svg";
 
 const NAV = [
   { to: "/",            label: "Home",    icon: Home },
@@ -15,13 +16,14 @@ export default function Navbar() {
     <>
       {/* Top bar — desktop */}
       <header className="hidden md:flex items-center justify-between px-6 py-4 bg-[#1e293b] border-b border-slate-700/50">
-        <Link to="/" className="flex items-center gap-2 text-xl font-bold text-white">
-          <span className="text-2xl">⚽</span>
-          <span className="text-sky-400">Sports</span>
-          <span>AI</span>
-          <span className="text-xs bg-purple-500/20 text-purple-400 border border-purple-500/30 px-2 py-0.5 rounded-full font-medium ml-1">
-            Autonomous
-          </span>
+        <Link to="/" className="flex items-center gap-3">
+          <img src={logoUrl} alt="HoorayHenry" className="h-9 w-auto" />
+          <div className="flex items-center gap-2">
+            <span className="text-xl font-bold text-white">Sports <span className="text-sky-400">AI</span></span>
+            <span className="text-xs bg-purple-500/20 text-purple-400 border border-purple-500/30 px-2 py-0.5 rounded-full font-medium">
+              Autonomous
+            </span>
+          </div>
         </Link>
         <nav className="flex items-center gap-1">
           {NAV.map(({ to, label }) => (

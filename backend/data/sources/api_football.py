@@ -21,13 +21,24 @@ from config.settings import get_settings
 
 settings = get_settings()
 
-BASE = "https://api-football-v1.p.rapidapi.com/v3"
+BASE_RAPIDAPI = "https://api-football-v1.p.rapidapi.com/v3"
+BASE_DIRECT   = "https://v3.football.api-sports.io"
 
+# RapidAPI keys are long (50+ chars); direct api-football.com keys are 32-char hex
+def _is_rapidapi_key(key: str) -> bool:
+    return len(key) > 40
+
+def _base() -> str:
+    return BASE_RAPIDAPI if _is_rapidapi_key(settings.api_football_key) else BASE_DIRECT
 
 def _headers() -> dict:
+    if _is_rapidapi_key(settings.api_football_key):
+        return {
+            "X-RapidAPI-Key":  settings.api_football_key,
+            "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com",
+        }
     return {
-        "X-RapidAPI-Key":  settings.api_football_key,
-        "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com",
+        "x-apisports-key": settings.api_football_key,
     }
 
 
@@ -65,17 +76,21 @@ class APIFootballClient:
     def _get(self, endpoint: str, params: dict) -> dict:
         if not self.key:
             return {}
+        url = f"{_base()}/{endpoint}"
+        logger.debug(f"API-Football GET {url} params={params}")
         try:
             with httpx.Client(timeout=25) as c:
-                resp = c.get(f"{BASE}/{endpoint}", params=params, headers=_headers())
+                resp = c.get(url, params=params, headers=_headers())
+                logger.debug(f"API-Football response {resp.status_code}: {resp.text[:500]}")
                 resp.raise_for_status()
                 return resp.json()
         except httpx.HTTPStatusError as e:
+            body = e.response.text[:500]
             if e.response.status_code == 429:
-                logger.warning("API-Football rate limit hit — sleeping 60s")
+                logger.warning(f"API-Football rate limit hit — sleeping 60s. Body: {body}")
                 time.sleep(60)
             else:
-                logger.warning(f"API-Football [{endpoint}]: HTTP {e.response.status_code}")
+                logger.warning(f"API-Football [{endpoint}]: HTTP {e.response.status_code} — {body}")
         except Exception as e:
             logger.warning(f"API-Football [{endpoint}]: {e}")
         return {}
