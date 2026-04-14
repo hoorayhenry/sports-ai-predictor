@@ -164,14 +164,40 @@ def process_decisions(db: Session) -> int:
         sport_key   = m.competition.sport.key if m.competition and m.competition.sport else "unknown"
         competition = m.competition.name if m.competition else ""
 
-        # Determine top outcome and probability
-        result_probs = {
-            "H": pred.home_win_prob or 0.0,
-            "D": pred.draw_prob or 0.0,
-            "A": pred.away_win_prob or 0.0,
+        # Evaluate all markets: result + over/under + BTTS
+        candidates = {
+            "H":        pred.home_win_prob or 0.0,
+            "D":        pred.draw_prob     or 0.0,
+            "A":        pred.away_win_prob or 0.0,
         }
-        top_outcome = max(result_probs, key=result_probs.get)
-        top_prob    = result_probs[top_outcome]
+
+        # Add side markets only when model has made a prediction AND odds exist
+        over25_prob = pred.over25_prob or 0.0
+        btts_prob   = pred.btts_prob   or 0.0
+
+        has_totals_odds = any(o.market == "totals" for o in m.odds)
+        has_btts_odds   = any(o.market == "btts"   for o in m.odds)
+
+        if over25_prob > 0 and has_totals_odds:
+            # Use whichever side is stronger (over or under)
+            under_prob = 1.0 - over25_prob
+            if over25_prob >= under_prob:
+                candidates["over"]  = over25_prob
+            else:
+                candidates["under"] = under_prob
+
+        if btts_prob > 0 and has_btts_odds:
+            btts_no_prob = 1.0 - btts_prob
+            if btts_prob >= btts_no_prob:
+                candidates["btts_yes"] = btts_prob
+            else:
+                candidates["btts_no"]  = btts_no_prob
+
+        top_outcome = max(candidates, key=candidates.get)
+        top_prob    = candidates[top_outcome]
+
+        # Volatility only makes sense for match result market
+        _result_probs = {k: v for k, v in candidates.items() if k in ("H", "D", "A")}
 
         # ELO diff
         home_elo = m.home.elo_rating if m.home else 1500.0
@@ -193,24 +219,37 @@ def process_decisions(db: Session) -> int:
             top_prob, pred.expected_value, elo_diff_abs, opt_boost + intel_boost
         )
 
-        # Volatility
-        volatile, vol_reason = detect_volatility(
-            pred.home_win_prob or 0.0,
-            pred.draw_prob,
-            pred.away_win_prob or 0.0,
-        )
+        # Volatility — only checked for result market (H/D/A)
+        if top_outcome in ("H", "D", "A"):
+            volatile, vol_reason = detect_volatility(
+                pred.home_win_prob or 0.0,
+                pred.draw_prob,
+                pred.away_win_prob or 0.0,
+            )
+        else:
+            # Side markets (over/under, BTTS) don't have three-way volatility
+            volatile, vol_reason = False, ""
 
         # Decision
         decision = make_ai_decision(top_prob, conf, volatile)
         prob_tag  = classify_probability(top_prob)
 
-        # Best odds for recommended outcome
+        # Best odds for recommended outcome across all markets
         rec_odds = None
-        market_map = {"H": "home", "D": "draw", "A": "away"}
-        db_outcome = market_map.get(top_outcome, "home")
-        h2h_prices = [o.price for o in m.odds if o.market == "h2h" and o.outcome == db_outcome]
-        if h2h_prices:
-            rec_odds = max(h2h_prices)
+        outcome_to_market = {
+            "H": ("h2h",   "home"),
+            "D": ("h2h",   "draw"),
+            "A": ("h2h",   "away"),
+            "over":     ("totals", "over"),
+            "under":    ("totals", "under"),
+            "btts_yes": ("btts",   "yes"),
+            "btts_no":  ("btts",   "no"),
+        }
+        if top_outcome in outcome_to_market:
+            mkt, db_out = outcome_to_market[top_outcome]
+            prices = [o.price for o in m.odds if o.market == mkt and o.outcome == db_out]
+            if prices:
+                rec_odds = max(prices)
 
         # Upsert MatchDecision
         md = db.query(MatchDecision).filter_by(match_id=m.id).first()
