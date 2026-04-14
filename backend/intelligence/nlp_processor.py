@@ -1,5 +1,8 @@
 """
-Claude Haiku-powered NLP extraction for sports intelligence signals.
+Gemini Flash-powered NLP extraction for sports intelligence signals.
+
+Uses Google Gemini 2.0 Flash — FREE tier: 1,500 requests/day, no credit card.
+Get your key at: https://aistudio.google.com → "Get API key"
 
 Given a news article text + team name, extracts:
   - Injuries (player, severity, impact score)
@@ -7,19 +10,16 @@ Given a news article text + team name, extracts:
   - Player returns (positive impact)
   - Team morale signal
   - Overall team impact score (-1.0 to +1.0)
-
-Uses claude-haiku-4-5-20251001 for low cost and fast response (~50ms).
 """
 from __future__ import annotations
 import json
+import httpx
 from loguru import logger
 
-try:
-    import anthropic as _anthropic_lib
-    _ANTHROPIC_OK = True
-except ImportError:
-    _ANTHROPIC_OK = False
-    logger.warning("anthropic package not installed — NLP extraction disabled")
+_GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    "gemini-flash-latest:generateContent?key={api_key}"
+)
 
 _PROMPT = """\
 You are a sports intelligence analyst. Extract structured signals from the sports news article below.
@@ -64,40 +64,49 @@ Return ONLY valid JSON. No markdown, no explanation."""
 
 def extract_signals(text: str, team_name: str, api_key: str) -> dict:
     """
-    Extract intelligence signals from article text using Claude Haiku.
-    Returns structured signal dict. Falls back to empty signals on any error.
+    Extract intelligence signals from article text using Gemini Flash (free).
+    Retries once on 429 rate limit. Falls back to empty signals on any error.
     """
-    if not _ANTHROPIC_OK or not api_key or not text or not text.strip():
+    if not api_key or not text or not text.strip():
         return _empty()
 
-    try:
-        client = _anthropic_lib.Anthropic(api_key=api_key)
-        truncated = text[:2000]
+    prompt  = _PROMPT.format(team_name=team_name, text=text[:2000])
+    url     = _GEMINI_URL.format(api_key=api_key)
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1024},
+    }
 
-        msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=600,
-            messages=[{
-                "role": "user",
-                "content": _PROMPT.format(team_name=team_name, text=truncated),
-            }],
-        )
+    for attempt in range(2):
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                resp = client.post(url, json=payload)
 
-        raw = msg.content[0].text.strip()
+            if resp.status_code == 429:
+                if attempt == 0:
+                    import time; time.sleep(5)
+                    continue
+                logger.debug(f"Gemini rate limit for {team_name} — skipping")
+                return _empty()
 
-        # Strip markdown fences if present
-        if "```json" in raw:
-            raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
-        elif "```" in raw:
-            raw = raw.split("```", 1)[1].split("```", 1)[0].strip()
+            resp.raise_for_status()
 
-        result = json.loads(raw)
-        return _validate(result)
+            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-    except json.JSONDecodeError as e:
-        logger.debug(f"NLP JSON parse error for {team_name}: {e}")
-    except Exception as e:
-        logger.warning(f"NLP extraction failed for {team_name}: {e}")
+            if "```json" in raw:
+                raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
+            elif "```" in raw:
+                raw = raw.split("```", 1)[1].split("```", 1)[0].strip()
+
+            return _validate(json.loads(raw))
+
+        except json.JSONDecodeError as e:
+            logger.debug(f"NLP JSON parse error for {team_name}: {e}")
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"Gemini API error for {team_name}: {e.response.status_code}")
+        except Exception as e:
+            logger.warning(f"NLP extraction failed for {team_name}: {e}")
+        break
 
     return _empty()
 
@@ -105,14 +114,13 @@ def extract_signals(text: str, team_name: str, api_key: str) -> dict:
 def _validate(d: dict) -> dict:
     """Ensure all required keys exist with correct types."""
     out = _empty()
-    out["injuries"]   = d.get("injuries", [])
-    out["suspensions"] = d.get("suspensions", [])
-    out["returns"]    = d.get("returns", [])
-    out["morale"]     = d.get("morale", {"score": 0.0, "reason": ""})
+    out["injuries"]            = d.get("injuries", [])
+    out["suspensions"]         = d.get("suspensions", [])
+    out["returns"]             = d.get("returns", [])
+    out["morale"]              = d.get("morale", {"score": 0.0, "reason": ""})
     out["overall_team_impact"] = float(d.get("overall_team_impact", 0.0))
     out["confidence"]          = float(d.get("confidence", 0.5))
 
-    # Clamp values
     out["overall_team_impact"] = max(-1.0, min(1.0, out["overall_team_impact"]))
     out["confidence"]          = max(0.0,  min(1.0, out["confidence"]))
     return out
@@ -120,10 +128,10 @@ def _validate(d: dict) -> dict:
 
 def _empty() -> dict:
     return {
-        "injuries":           [],
-        "suspensions":        [],
-        "returns":            [],
-        "morale":             {"score": 0.0, "reason": ""},
+        "injuries":            [],
+        "suspensions":         [],
+        "returns":             [],
+        "morale":              {"score": 0.0, "reason": ""},
         "overall_team_impact": 0.0,
         "confidence":          0.0,
     }

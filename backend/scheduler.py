@@ -196,9 +196,9 @@ def job_fetch_intelligence():
         from data.database import get_sync_session
         from intelligence.signals import run_intelligence_for_upcoming
 
-        api_key = settings.anthropic_api_key
+        api_key = settings.gemini_api_key
         if not api_key:
-            logger.debug("[SCHEDULER] ANTHROPIC_API_KEY not set — intelligence job skipped")
+            logger.debug("[SCHEDULER] GEMINI_API_KEY not set — intelligence job skipped")
             return
 
         with get_sync_session() as db:

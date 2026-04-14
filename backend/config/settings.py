@@ -23,9 +23,9 @@ class Settings(BaseSettings):
     # football-data.org  (optional, supplements football-data.co.uk CSVs)
     football_data_key: str = ""
 
-    # Anthropic (Claude Haiku) — for real-time news NLP extraction
-    # Get your key at https://console.anthropic.com
-    anthropic_api_key: str = ""
+    # Google Gemini Flash — for real-time news NLP extraction (FREE: 1,500 req/day)
+    # Get your key at https://aistudio.google.com → "Get API key"
+    gemini_api_key: str = ""
 
     # ── ML hyperparameters ────────────────────────────────────────────
     model_dir:            str   = "ml/saved"
