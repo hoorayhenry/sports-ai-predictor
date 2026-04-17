@@ -171,6 +171,7 @@ def job_daily_decisions():
 def job_resolve_matches():
     """
     Fetch real match results from APIs, mark finished, log performance.
+    Also backfills xG + shot stats from API-Football for recently finished matches.
     Runs every 2 hours.
     """
     logger.info("[SCHEDULER] Resolving finished matches + fetching real results...")
@@ -184,6 +185,253 @@ def job_resolve_matches():
     except Exception as e:
         logger.error(f"[SCHEDULER] Resolve job failed: {e}")
 
+    # Backfill xG data from API-Football for enriched training features
+    api_key = settings.api_football_key
+    if api_key:
+        try:
+            from data.database import get_sync_session
+            from data.loaders.xg_backfill import backfill_xg
+
+            with get_sync_session() as db:
+                enriched = backfill_xg(db, api_key, max_matches=40)
+            if enriched > 0:
+                logger.info(f"[SCHEDULER] xG backfill: {enriched} matches enriched")
+        except Exception as e:
+            logger.warning(f"[SCHEDULER] xG backfill error: {e}")
+
+
+def job_fetch_intelligence():
+    """
+    Scrape news + extract intelligence signals for upcoming matches.
+    Runs every 30 minutes so injury/lineup news is picked up quickly.
+    Only processes matches without fresh signals (last 6 hours).
+    """
+    logger.info("[SCHEDULER] Fetching intelligence signals...")
+    try:
+        from data.database import get_sync_session
+        from intelligence.signals import run_intelligence_for_upcoming
+
+        api_key = settings.gemini_api_key
+        if not api_key:
+            logger.debug("[SCHEDULER] GEMINI_API_KEY not set — intelligence job skipped")
+            return
+
+        with get_sync_session() as db:
+            n = run_intelligence_for_upcoming(db, api_key, hours_ahead=48)
+        logger.info(f"[SCHEDULER] Intelligence: {n} new signals saved")
+    except Exception as e:
+        logger.error(f"[SCHEDULER] Intelligence job failed: {e}")
+
+
+def job_ingest_multi_sport_history():
+    """
+    Incremental multi-sport historical data ingestion via Sofascore + ESPN.
+    Fetches all sports (football, basketball, tennis, baseball, NFL, NHL, cricket,
+    rugby, handball, volleyball) for dates not yet in the DB.
+    Runs daily at 02:00 UTC — off-peak, before the weekly retrain.
+    More data in DB = better ML predictions across all sports.
+    """
+    logger.info("[SCHEDULER] Starting multi-sport historical ingestion...")
+    try:
+        from data.database import get_sync_session
+        from data.loaders.multi_sport_ingest import (
+            run_full_multi_sport_ingest, run_espn_historical_ingest
+        )
+
+        with get_sync_session() as db:
+            # Sofascore: fetch last 7 days of new data (incremental)
+            ss_results = run_full_multi_sport_ingest(db, days_back=7)
+
+        with get_sync_session() as db:
+            # ESPN: supplement US sports with last 3 seasons
+            from datetime import datetime as _dt
+            current_year = _dt.utcnow().year
+            espn_results = run_espn_historical_ingest(
+                db, seasons=list(range(current_year - 2, current_year + 1))
+            )
+
+        total = sum(ss_results.values()) + sum(espn_results.values())
+        logger.info(
+            f"[SCHEDULER] Multi-sport ingest complete: {total} new matches. "
+            f"Breakdown: {ss_results}"
+        )
+    except Exception as e:
+        logger.error(f"[SCHEDULER] Multi-sport ingest failed: {e}")
+
+
+def job_retrain_models():
+    """
+    Weekly continuous learning: retrain all sport models on accumulated DB data.
+    As 2026 match results fill in, accuracy steadily improves.
+    Runs Sunday 03:00 UTC (low traffic).
+    """
+    logger.info("[SCHEDULER] Starting weekly model retraining...")
+    try:
+        from data.database import get_sync_session
+        from ml.continuous_learner import run_full_retrain
+
+        with get_sync_session() as db:
+            results = run_full_retrain(db)
+
+        for r in results:
+            logger.info(
+                f"[SCHEDULER] Retrain {r['sport']}: {r['status']} "
+                f"({r.get('rows', 0)} rows, accuracy={r.get('accuracy', {})})"
+            )
+    except Exception as e:
+        logger.error(f"[SCHEDULER] Retrain job failed: {e}")
+
+
+def job_fetch_news():
+    """
+    Fetch latest football news from RSS feeds, rewrite with Gemini, save to DB.
+    Runs every 6 hours.
+    """
+    logger.info("[SCHEDULER] Fetching and rewriting news articles...")
+    try:
+        from data.database import get_sync_session
+        from intelligence.news_writer import run_news_pipeline_sync
+
+        api_key = settings.gemini_api_key
+        if not api_key:
+            logger.debug("[SCHEDULER] GEMINI_API_KEY not set — news job skipped")
+            return
+
+        with get_sync_session() as db:
+            saved = run_news_pipeline_sync(db, api_key, hours=8, max_articles=15)
+        logger.info(f"[SCHEDULER] News: {saved} articles saved")
+    except Exception as e:
+        logger.error(f"[SCHEDULER] News job failed: {e}")
+
+
+def job_live_scores():
+    """
+    Fetch live match scores from Sofascore (primary) + ESPN fallback and update the DB.
+    Adaptive rate: reschedules itself at 30s when matches are live (Sofascore cadence),
+    5 min when idle. SSE bus pushes changes to connected clients immediately.
+    """
+    logger.info("[SCHEDULER] Updating live scores via ESPN...")
+    live_count = 0
+    try:
+        from data.database import get_sync_session
+        from data.live_scores import update_live_scores, fetch_live_fixtures_espn
+
+        api_key = settings.api_football_key
+
+        with get_sync_session() as db:
+            live_count = update_live_scores(db, api_key)
+        logger.info(f"[SCHEDULER] Live scores: {live_count} matches updated")
+
+        if live_count > 0:
+            from data.live_bus import notify
+            notify(live_count)
+    except Exception as e:
+        logger.error(f"[SCHEDULER] Live scores job failed: {e}")
+    finally:
+        # Adaptive interval: poll every 30s during live matches (Sofascore updates every 20-30s),
+        # every 5 min when no live matches to avoid unnecessary polling.
+        global _scheduler
+        if _scheduler and _scheduler.running:
+            next_interval = 30 if live_count > 0 else 300
+            try:
+                _scheduler.reschedule_job(
+                    "live_scores",
+                    trigger=IntervalTrigger(seconds=next_interval),
+                )
+            except Exception:
+                pass
+
+
+def job_refresh_clubs_data():
+    """
+    Refresh standings and fixtures for all leagues in the Clubs tab.
+    Scheduler runs this every 5 min so routes always read from DB — no per-user ESPN calls.
+    Runs immediately on startup (next_run_time=now) to warm the DB before first user hit.
+    """
+    logger.info("[SCHEDULER] Refreshing Clubs standings + fixtures...")
+    try:
+        from api.routes.standings import (
+            LEAGUES, CURRENT_SEASON,
+            _fetch_espn, _fetch_league_fixtures, _db_put_sync,
+        )
+
+        refreshed = 0
+        for slug, name, _country, _flag in LEAGUES:
+            # Standings
+            try:
+                result = _fetch_espn(slug, CURRENT_SEASON)
+                if result:
+                    _db_put_sync(slug, CURRENT_SEASON, "standings", result)
+                    refreshed += 1
+            except Exception as e:
+                logger.debug(f"[SCHEDULER] Standings refresh failed {slug}: {e}")
+
+            # Fixtures (4 days back, 14 ahead)
+            try:
+                result = _fetch_league_fixtures(slug, CURRENT_SEASON)
+                if result:
+                    _db_put_sync(slug, CURRENT_SEASON, "fixtures", result)
+                    refreshed += 1
+            except Exception as e:
+                logger.debug(f"[SCHEDULER] Fixtures refresh failed {slug}: {e}")
+
+        logger.info(f"[SCHEDULER] Clubs data: {refreshed} datasets refreshed")
+    except Exception as e:
+        logger.error(f"[SCHEDULER] Clubs data refresh failed: {e}")
+
+
+def job_refresh_clubs_news_leaders():
+    """
+    Refresh league news and top scorers for all leagues.
+    Runs every 30 min — less time-sensitive than standings/fixtures.
+    """
+    logger.info("[SCHEDULER] Refreshing Clubs news + leaders...")
+    try:
+        from api.routes.standings import (
+            LEAGUES, CURRENT_SEASON, _NEWS_SEASON,
+            _fetch_league_news, _fetch_league_leaders, _db_put_sync,
+        )
+
+        for slug, _, _, _ in LEAGUES:
+            try:
+                articles = _fetch_league_news(slug)
+                _db_put_sync(slug, _NEWS_SEASON, "news", {"articles": articles})
+            except Exception as e:
+                logger.debug(f"[SCHEDULER] News refresh failed {slug}: {e}")
+
+            try:
+                leaders = _fetch_league_leaders(slug, CURRENT_SEASON)
+                _db_put_sync(slug, CURRENT_SEASON, "leaders", {"categories": leaders})
+            except Exception as e:
+                logger.debug(f"[SCHEDULER] Leaders refresh failed {slug}: {e}")
+
+        logger.info("[SCHEDULER] Clubs news + leaders refreshed")
+    except Exception as e:
+        logger.error(f"[SCHEDULER] Clubs news/leaders refresh failed: {e}")
+
+
+def job_retry_drafts():
+    """
+    Retry AI rewriting of draft articles that failed on first pass.
+    Runs every 30 minutes — promotes drafts to 'published' as Gemini quota allows.
+    Draft articles are raw scraped text held back from the public feed.
+    """
+    logger.info("[SCHEDULER] Retrying draft article rewrites...")
+    try:
+        from data.database import get_sync_session
+        from intelligence.news_writer import retry_draft_articles
+
+        api_key = settings.gemini_api_key
+        if not api_key:
+            logger.debug("[SCHEDULER] GEMINI_API_KEY not set — draft retry skipped")
+            return
+
+        with get_sync_session() as db:
+            promoted = retry_draft_articles(db, api_key, max_articles=10)
+        logger.info(f"[SCHEDULER] Draft retry: {promoted} articles promoted to published")
+    except Exception as e:
+        logger.error(f"[SCHEDULER] Draft retry job failed: {e}")
+
 
 def job_fetch_odds():
     """Fetch live odds from Sportybet + Odds API."""
@@ -195,11 +443,138 @@ def job_fetch_odds():
         logger.error(f"[SCHEDULER] Odds fetch failed: {e}")
 
 
+def job_fetch_lineups():
+    """
+    Fetch confirmed lineups + injury reports from API-Football for
+    matches kicking off in the next 24 hours that are marked PLAY.
+    Converts them to IntelligenceSignal rows so the decision engine
+    can factor in unavailable players before the daily email.
+
+    Runs hourly — lineups are published ~1 hr before kickoff.
+    Only consumes quota for PLAY-labelled matches (free tier: 100 req/day).
+    """
+    api_key = settings.api_football_key
+    if not api_key:
+        logger.debug("[SCHEDULER] API_FOOTBALL_KEY not set — lineup job skipped")
+        return
+
+    logger.info("[SCHEDULER] Fetching pre-match lineups + injuries via API-Football...")
+    try:
+        from data.database import get_sync_session
+        from data.db_models.models import Match, MatchDecision, Competition, Participant, IntelligenceSignal
+        from data.loaders.api_football import build_injury_signals
+        from sqlalchemy.orm import joinedload
+
+        with get_sync_session() as db:
+            cutoff = datetime.utcnow() + timedelta(hours=24)
+            rows = (
+                db.query(Match)
+                .join(MatchDecision, Match.id == MatchDecision.match_id)
+                .join(Competition)
+                .options(
+                    joinedload(Match.home),
+                    joinedload(Match.away),
+                    joinedload(Match.competition),
+                )
+                .filter(
+                    Match.status == "scheduled",
+                    Match.match_date <= cutoff,
+                    Match.match_date >= datetime.utcnow(),
+                    MatchDecision.ai_decision == "PLAY",
+                )
+                .all()
+            )
+
+            new_signals = 0
+            for m in rows:
+                for participant, is_home in [(m.home, True), (m.away, False)]:
+                    if not participant:
+                        continue
+                    # Use participant external_id to extract API-Football team ID
+                    # Format from our ingest: "football_team_name" — API-Football ID
+                    # requires a separate mapping table; for now we skip if no api_id stored
+                    api_team_id = getattr(participant, "api_football_id", None)
+                    if not api_team_id:
+                        continue
+
+                    signals = build_injury_signals(
+                        api_key,
+                        team_id=api_team_id,
+                        team_name=participant.name,
+                    )
+                    for sig in signals:
+                        # Deduplicate: skip if same player signal already exists for this match
+                        existing = db.query(IntelligenceSignal).filter_by(
+                            match_id=m.id,
+                            team_id=participant.id,
+                            entity_name=sig["entity_name"],
+                            signal_type=sig["signal_type"],
+                        ).first()
+                        if not existing:
+                            db.add(IntelligenceSignal(
+                                match_id     = m.id,
+                                team_id      = participant.id,
+                                team_name    = sig["team_name"],
+                                signal_type  = sig["signal_type"],
+                                entity_name  = sig["entity_name"],
+                                impact_score = sig["impact_score"],
+                                confidence   = sig["confidence"],
+                                source_type  = sig["source_type"],
+                                raw_text     = sig["raw_text"],
+                            ))
+                            new_signals += 1
+
+            db.commit()
+        logger.info(f"[SCHEDULER] Lineups job: {new_signals} new injury signals saved")
+    except Exception as e:
+        logger.error(f"[SCHEDULER] Lineups job failed: {e}")
+
+
 # ── Scheduler lifecycle ───────────────────────────────────────────────
 
 def start_scheduler():
     global _scheduler
     _scheduler = BackgroundScheduler(timezone="UTC")
+
+    # Live scores — adaptive: 30s when matches are live (Sofascore updates every 20-30s),
+    # 5 min when no live matches. SSE pushes score changes to clients immediately.
+    _scheduler.add_job(
+        job_live_scores,
+        IntervalTrigger(seconds=30),
+        id="live_scores",
+        replace_existing=True,
+        misfire_grace_time=15,
+        next_run_time=datetime.utcnow(),
+    )
+
+    # Clubs standings + fixtures — every 5 min, warm DB immediately on startup
+    _scheduler.add_job(
+        job_refresh_clubs_data,
+        IntervalTrigger(minutes=5),
+        id="refresh_clubs_data",
+        replace_existing=True,
+        misfire_grace_time=120,
+        next_run_time=datetime.utcnow(),   # fire immediately so first user hits warm DB
+    )
+
+    # Clubs news + top scorers — every 30 min, warm DB immediately on startup
+    _scheduler.add_job(
+        job_refresh_clubs_news_leaders,
+        IntervalTrigger(minutes=30),
+        id="refresh_clubs_news_leaders",
+        replace_existing=True,
+        misfire_grace_time=300,
+        next_run_time=datetime.utcnow(),
+    )
+
+    # Intelligence signals every 30 minutes (real-time news/injury tracking)
+    _scheduler.add_job(
+        job_fetch_intelligence,
+        IntervalTrigger(minutes=30),
+        id="fetch_intelligence",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
 
     # Fetch odds every 6 hours
     _scheduler.add_job(
@@ -234,6 +609,50 @@ def start_scheduler():
         id="resolve_matches",
         replace_existing=True,
         misfire_grace_time=300,
+    )
+
+    # News pipeline every 3 hours — fresh articles throughout the day
+    _scheduler.add_job(
+        job_fetch_news,
+        IntervalTrigger(hours=3),
+        id="fetch_news",
+        replace_existing=True,
+        misfire_grace_time=600,
+    )
+
+    # Draft retry every 30 minutes — promotes unwritten articles to published as Gemini quota frees up
+    _scheduler.add_job(
+        job_retry_drafts,
+        IntervalTrigger(minutes=30),
+        id="retry_drafts",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+
+    # Pre-match lineups + injuries every hour (API-Football, free tier)
+    _scheduler.add_job(
+        job_fetch_lineups,
+        IntervalTrigger(hours=1),
+        id="fetch_lineups",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+
+    # Multi-sport historical data ingestion — daily at 02:00 UTC
+    # Feeds the ML model with fresh data from Sofascore + ESPN across all sports
+    _scheduler.add_job(
+        job_ingest_multi_sport_history,
+        CronTrigger(hour=2, minute=0),
+        id="ingest_multi_sport",
+        replace_existing=True,
+    )
+
+    # Weekly model retraining — Sunday 03:00 UTC (after daily ingest finishes)
+    _scheduler.add_job(
+        job_retrain_models,
+        CronTrigger(day_of_week="sun", hour=3, minute=0),
+        id="retrain_models",
+        replace_existing=True,
     )
 
     _scheduler.start()

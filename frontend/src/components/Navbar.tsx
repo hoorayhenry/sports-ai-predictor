@@ -1,61 +1,102 @@
 import { Link, useLocation } from "react-router-dom";
-import { Home, Flame, Target, BarChart2, History } from "lucide-react";
-import logoUrl from "../assets/hoorayhenry-logo.svg";
+import { Home, Flame, Target, BarChart2, History, Newspaper, Activity, Trophy, Radio } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { fetchLiveScores } from "../api/client";
+import logoUrl from "../assets/playsigma-logo.svg";
 
 const NAV = [
-  { to: "/",            label: "Home",    icon: Home },
-  { to: "/picks",       label: "Picks",   icon: Flame },
-  { to: "/sets",        label: "Sets",    icon: Target },
-  { to: "/history",     label: "History", icon: History },
-  { to: "/performance", label: "Stats",   icon: BarChart2 },
+  { to: "/",            label: "Matches",  icon: Home },
+  { to: "/live",        label: "Live",     icon: Radio },
+  { to: "/picks",       label: "Picks",    icon: Flame },
+  { to: "/tables",      label: "Clubs",    icon: Trophy },
+  { to: "/sets",        label: "Sets",     icon: Target },
+  { to: "/news",        label: "News",     icon: Newspaper },
+  { to: "/history",     label: "History",  icon: History },
+  { to: "/performance", label: "Stats",    icon: BarChart2 },
+  { to: "/analytics",   label: "Intel",    icon: Activity },
 ];
 
 export default function Navbar() {
   const { pathname } = useLocation();
+
+  const { data: liveData } = useQuery({
+    queryKey: ["live-scores-nav"],
+    queryFn: fetchLiveScores,
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  });
+  const liveCount = liveData?.matches?.length ?? 0;
+
   return (
     <>
-      {/* Top bar — desktop */}
-      <header className="hidden md:flex items-center justify-between px-6 py-4 bg-[#1e293b] border-b border-slate-700/50">
-        <Link to="/" className="flex items-center gap-3">
-          <img src={logoUrl} alt="HoorayHenry" className="h-9 w-auto" />
-          <div className="flex items-center gap-2">
-            <span className="text-xl font-bold text-white">Sports <span className="text-sky-400">AI</span></span>
-            <span className="text-xs bg-purple-500/20 text-purple-400 border border-purple-500/30 px-2 py-0.5 rounded-full font-medium">
-              Autonomous
-            </span>
-          </div>
+      {/* ── Desktop top bar ───────────────────────────────── */}
+      <header className="hidden md:flex items-center justify-between px-6 py-3 navbar-glass sticky top-0 z-50">
+
+        {/* Logo */}
+        <Link to="/" className="flex items-center gap-0 group">
+          <img
+            src={logoUrl}
+            alt="PlaySigma"
+            className="h-8 w-auto logo-glow animate-float"
+          />
         </Link>
+
+        {/* Nav links */}
         <nav className="flex items-center gap-1">
-          {NAV.map(({ to, label }) => (
+          {NAV.map(({ to, label }) => {
+            const active = pathname === to;
+            return (
+              <Link
+                key={to}
+                to={to}
+                className={`relative px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200 ${
+                  active
+                    ? "text-pi-primary"
+                    : "text-pi-secondary hover:text-pi-primary hover:bg-pi-indigo/8"
+                }`}
+              >
+                {label}
+                {active && (
+                  <span className="absolute bottom-0 left-1/2 -translate-x-1/2 w-4 h-0.5 rounded-full bg-gradient-to-r from-pi-indigo to-pi-violet" />
+                )}
+              </Link>
+            );
+          })}
+        </nav>
+
+        {/* Status pill */}
+        <div className="flex items-center gap-2">
+          <Link to="/live" className="flex items-center gap-1.5 text-xs text-pi-secondary bg-pi-surface px-3 py-1.5 rounded-full border border-pi-border hover:border-pi-emerald/40 transition-colors">
+            <span className="w-1.5 h-1.5 rounded-full bg-pi-emerald animate-pulse" />
+            {liveCount > 0 ? (
+              <><span className="font-semibold text-pi-emerald">{liveCount}</span> Live</>
+            ) : (
+              "Live"
+            )}
+          </Link>
+        </div>
+      </header>
+
+      {/* ── Mobile bottom tab bar ─────────────────────────── */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 navbar-glass border-t border-pi-border flex safe-bottom">
+        {NAV.map(({ to, label, icon: Icon }) => {
+          const active = pathname === to;
+          return (
             <Link
               key={to}
               to={to}
-              className={`px-4 py-2 rounded-xl text-sm font-medium transition-colors ${
-                pathname === to
-                  ? "bg-sky-500/20 text-sky-400"
-                  : "text-slate-400 hover:text-white hover:bg-slate-700/50"
+              className={`flex-1 flex flex-col items-center justify-center py-2.5 gap-0.5 text-[11px] font-medium transition-colors duration-200 ${
+                active ? "text-pi-indigo-light" : "text-pi-muted"
               }`}
             >
-              {label}
+              <Icon size={17} strokeWidth={active ? 2.2 : 1.7} />
+              <span className={active ? "font-semibold" : ""}>{label}</span>
+              {active && (
+                <span className="absolute bottom-0 w-6 h-0.5 rounded-full bg-pi-indigo" />
+              )}
             </Link>
-          ))}
-        </nav>
-      </header>
-
-      {/* Bottom tab bar — mobile */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-[#1e293b] border-t border-slate-700/50 flex">
-        {NAV.map(({ to, label, icon: Icon }) => (
-          <Link
-            key={to}
-            to={to}
-            className={`flex-1 flex flex-col items-center justify-center py-2 gap-0.5 text-xs font-medium transition-colors ${
-              pathname === to ? "text-sky-400" : "text-slate-500"
-            }`}
-          >
-            <Icon size={18} />
-            <span>{label}</span>
-          </Link>
-        ))}
+          );
+        })}
       </nav>
     </>
   );

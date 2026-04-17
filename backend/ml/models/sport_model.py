@@ -26,6 +26,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import log_loss, accuracy_score
+from sklearn.isotonic import IsotonicRegression
 
 from features.engineering import COMMON_FEATURES
 
@@ -45,6 +46,7 @@ class SportModel:
         self.sport_key = sport_key
         self.models: dict = {}        # market -> classifier
         self.encoders: dict = {}      # market -> LabelEncoder (for result)
+        self.calibrators: dict = {}   # market -> {class_idx: IsotonicRegression}
         self.features = COMMON_FEATURES
 
     # ------------------------------------------------------------------
@@ -55,11 +57,16 @@ class SportModel:
         scores = {}
         X = df[self.features].astype(float)
 
+        # Recency weights: optional column from build_training_matrix
+        has_weights = "sample_weight" in df.columns
+        weights_all = df["sample_weight"].values if has_weights else None
+
         for market in MARKETS:
             if market not in df.columns:
                 continue
             y_raw = df[market].dropna()
             X_m = X.loc[y_raw.index]
+            w_m = weights_all[y_raw.index] if has_weights else None
 
             if len(y_raw) < 50:
                 logger.warning(f"[{self.sport_key}] {market}: only {len(y_raw)} samples — skipping")
@@ -72,12 +79,20 @@ class SportModel:
             else:
                 y = y_raw.astype(int).values
 
-            X_tr, X_val, y_tr, y_val = train_test_split(
-                X_m, y, test_size=0.2, random_state=42, stratify=y if len(np.unique(y)) > 1 else None
-            )
+            if w_m is not None:
+                X_tr, X_val, y_tr, y_val, w_tr, w_val = train_test_split(
+                    X_m, y, w_m, test_size=0.2, random_state=42,
+                    stratify=y if len(np.unique(y)) > 1 else None,
+                )
+            else:
+                X_tr, X_val, y_tr, y_val = train_test_split(
+                    X_m, y, test_size=0.2, random_state=42,
+                    stratify=y if len(np.unique(y)) > 1 else None,
+                )
+                w_tr = None
 
             clf = self._build_classifier(market, len(np.unique(y)))
-            clf.fit(X_tr, y_tr)
+            clf.fit(X_tr, y_tr, sample_weight=w_tr)
 
             preds = clf.predict_proba(X_val)
             ll = log_loss(y_val, preds)
@@ -85,6 +100,20 @@ class SportModel:
             scores[market] = ll
             logger.info(f"[{self.sport_key}] {market}: log_loss={ll:.4f}  acc={acc:.3f}")
             self.models[market] = clf
+
+            # ── Isotonic calibration per class ───────────────────────
+            # Fit one IsotonicRegression per output class so that
+            # predicted probabilities match empirical frequencies.
+            # This is critical for accurate edge detection vs market odds.
+            n_classes = preds.shape[1]
+            cals = {}
+            for ci in range(n_classes):
+                y_binary = (y_val == ci).astype(int)
+                iso = IsotonicRegression(out_of_bounds="clip")
+                iso.fit(preds[:, ci], y_binary)
+                cals[ci] = iso
+            self.calibrators[market] = cals
+            logger.debug(f"[{self.sport_key}] {market}: calibrators fitted ({n_classes} classes)")
 
         return scores
 
@@ -141,20 +170,40 @@ class SportModel:
             clf = self.models["result"]
             le = self.encoders.get("result")
             proba = clf.predict_proba(X_feat)[0]
+            proba = self._calibrate("result", proba)
             classes = le.classes_ if le else ["home", "away"]
             out["result"] = {str(c): float(p) for c, p in zip(classes, proba)}
 
         # --- over25 ---
         if "over25" in self.models:
-            p_over = float(self.models["over25"].predict_proba(X_feat)[0][1])
-            out["over25"] = {"over": p_over, "under": 1 - p_over}
+            raw = self.models["over25"].predict_proba(X_feat)[0]
+            cal = self._calibrate("over25", raw)
+            out["over25"] = {"over": cal[1], "under": cal[0]}
 
         # --- btts ---
         if "btts" in self.models:
-            p_yes = float(self.models["btts"].predict_proba(X_feat)[0][1])
-            out["btts"] = {"yes": p_yes, "no": 1 - p_yes}
+            raw = self.models["btts"].predict_proba(X_feat)[0]
+            cal = self._calibrate("btts", raw)
+            out["btts"] = {"yes": cal[1], "no": cal[0]}
 
         return out
+
+    def _calibrate(self, market: str, proba: np.ndarray) -> np.ndarray:
+        """
+        Apply per-class isotonic calibration and renormalise to sum=1.
+        Falls back to raw probabilities if no calibrators are fitted.
+        """
+        cals = self.calibrators.get(market)
+        if not cals:
+            return proba
+        calibrated = np.array([
+            float(cals[ci].predict([proba[ci]])[0]) if ci in cals else proba[ci]
+            for ci in range(len(proba))
+        ])
+        total = calibrated.sum()
+        if total > 0:
+            calibrated /= total
+        return calibrated
 
     # ------------------------------------------------------------------
     # Persistence
@@ -186,9 +235,9 @@ class _EnsembleClassifier:
         self.w1, self.w2 = weights
         self.classes_ = None
 
-    def fit(self, X, y):
-        self.clf1.fit(X, y)
-        self.clf2.fit(X, y)
+    def fit(self, X, y, sample_weight=None):
+        self.clf1.fit(X, y, sample_weight=sample_weight)
+        self.clf2.fit(X, y, sample_weight=sample_weight)
         self.classes_ = self.clf1.classes_ if hasattr(self.clf1, "classes_") else np.unique(y)
         return self
 

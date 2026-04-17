@@ -118,8 +118,8 @@ def save_predictions(db: Session, match: Match, pred_probs: dict, value_bets: li
     else:
         pred_result = None
 
-    # Find value bet for result market (if any)
-    result_vb = next((v for v in value_bets if v.market == "h2h"), None)
+    # Pick the best value bet across ALL markets (not just h2h)
+    best_vb = max(value_bets, key=lambda v: v.ev) if value_bets else None
 
     p = Prediction(
         match_id=match.id,
@@ -130,12 +130,12 @@ def save_predictions(db: Session, match: Match, pred_probs: dict, value_bets: li
         over25_prob=over25_probs.get("over"),
         btts_prob=btts_probs.get("yes"),
         is_value_bet=bool(value_bets),
-        value_market=result_vb.market if result_vb else None,
-        value_outcome=result_vb.outcome if result_vb else None,
-        value_odds=result_vb.best_odds if result_vb else None,
-        expected_value=result_vb.ev if result_vb else None,
-        kelly_stake=result_vb.kelly_stake if result_vb else None,
-        confidence=result_vb.confidence if result_vb else None,
+        value_market=best_vb.market if best_vb else None,
+        value_outcome=best_vb.outcome if best_vb else None,
+        value_odds=best_vb.best_odds if best_vb else None,
+        expected_value=best_vb.ev if best_vb else None,
+        kelly_stake=best_vb.kelly_stake if best_vb else None,
+        confidence=best_vb.confidence if best_vb else None,
     )
     db.add(p)
     db.commit()

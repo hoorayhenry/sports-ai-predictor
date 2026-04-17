@@ -36,6 +36,21 @@ export interface Prediction {
   confidence: "high" | "medium" | "low" | null;
 }
 
+export interface IntelligenceSignal {
+  type: "injury" | "suspension" | "return" | "morale" | "lineup";
+  player: string | null;
+  team: string;
+  impact: number;       // -1.0 to +1.0
+  confidence: number;   // 0 to 1
+  source: string;
+  note: string;
+}
+
+export interface Intelligence {
+  has_intelligence: boolean;
+  signals: IntelligenceSignal[];
+}
+
 export interface Match {
   id: number;
   external_id: string;
@@ -49,11 +64,13 @@ export interface Match {
   away_elo: number;
   match_date: string;
   status: string;
+  live_minute: number | null;
   home_score: number | null;
   away_score: number | null;
   result: string | null;
   odds: Odds[];
   prediction: Prediction | null;
+  intelligence: Intelligence | null;
 }
 
 export interface MatchDecision {

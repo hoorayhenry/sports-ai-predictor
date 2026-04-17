@@ -7,6 +7,7 @@ Entry points:
   run_full_season_fetch() — download current season from API-Football (all fixtures)
 """
 from __future__ import annotations
+import json
 from datetime import datetime
 from loguru import logger
 from sqlalchemy.orm import Session
@@ -86,6 +87,8 @@ def ingest_events(db: Session, events: list[dict]) -> tuple[int, int]:
 
             match = db.query(Match).filter_by(external_id=ev["external_id"]).first()
 
+            extra_json = json.dumps(ev["extra"]) if ev.get("extra") else None
+
             if not match:
                 match = Match(
                     external_id    = ev["external_id"],
@@ -97,6 +100,7 @@ def ingest_events(db: Session, events: list[dict]) -> tuple[int, int]:
                     result         = ev.get("result"),
                     home_score     = ev.get("home_score"),
                     away_score     = ev.get("away_score"),
+                    extra_data     = extra_json,
                 )
                 db.add(match)
                 db.flush()
@@ -109,6 +113,9 @@ def ingest_events(db: Session, events: list[dict]) -> tuple[int, int]:
                     match.result     = ev.get("result", match.result)
                     match.home_score = ev.get("home_score", match.home_score)
                     match.away_score = ev.get("away_score", match.away_score)
+                    # Backfill shots/referee if we now have it and didn't before
+                    if extra_json and not match.extra_data:
+                        match.extra_data = extra_json
                     updated += 1
                 elif new_status == "live" and match.status == "scheduled":
                     match.status = "live"

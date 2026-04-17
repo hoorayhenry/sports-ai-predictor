@@ -60,6 +60,8 @@ class Participant(Base):
     logo_url: Mapped[Optional[str]] = mapped_column(String(256))
     elo_rating: Mapped[float] = mapped_column(Float, default=1500.0)
     elo_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    # API-Football numeric team ID — used for lineup/injury/xG lookups
+    api_football_id: Mapped[Optional[int]] = mapped_column(Integer, index=True)
 
 
 class Match(Base):
@@ -257,3 +259,90 @@ class OptimizationWeight(Base):
     success_rate: Mapped[float] = mapped_column(Float, default=0.5)
     sample_size: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class IntelligenceSignal(Base):
+    """News/social intelligence signals extracted via Claude Haiku NLP."""
+    __tablename__ = "intelligence_signals"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    match_id: Mapped[Optional[int]] = mapped_column(ForeignKey("matches.id"), index=True)
+    team_id: Mapped[Optional[int]] = mapped_column(ForeignKey("participants.id"), index=True)
+    team_name: Mapped[str] = mapped_column(String(128), default="")
+
+    # Signal classification
+    signal_type: Mapped[str] = mapped_column(String(32))   # injury|suspension|return|morale|lineup
+    entity_name: Mapped[Optional[str]] = mapped_column(String(128))  # player name if applicable
+
+    # Scoring: -1.0 (very negative for team) to +1.0 (very positive)
+    impact_score: Mapped[float] = mapped_column(Float, default=0.0)
+    confidence: Mapped[float] = mapped_column(Float, default=0.5)   # 0-1
+
+    # Source
+    source_url: Mapped[Optional[str]] = mapped_column(String(512))
+    source_type: Mapped[str] = mapped_column(String(32), default="news")  # news|rss|twitter
+    raw_text: Mapped[Optional[str]] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    match: Mapped[Optional["Match"]] = relationship(foreign_keys=[match_id])
+    team: Mapped[Optional["Participant"]] = relationship(foreign_keys=[team_id])
+
+    __table_args__ = (
+        Index("ix_intel_match_team", "match_id", "team_id"),
+    )
+
+
+class ModelTrainingLog(Base):
+    """Tracks every continuous learning retraining run."""
+    __tablename__ = "model_training_logs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sport_key: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="trained")   # trained|skipped|error
+    training_rows: Mapped[int] = mapped_column(Integer, default=0)
+    accuracy_json: Mapped[Optional[str]] = mapped_column(Text)           # {market: log_loss, ...}
+    trained_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class LeagueSeasonCache(Base):
+    """
+    Permanent store for historical league data fetched from ESPN.
+    Keyed by (league_slug, season, data_type) — fetched ONCE, stored forever.
+    Historical data never changes so there is no need to re-fetch.
+
+    data_type values: 'standings' | 'fixtures' | 'leaders'
+    json_data: the full serialised API response dict.
+    """
+    __tablename__ = "league_season_cache"
+
+    id:          Mapped[int]      = mapped_column(primary_key=True)
+    league_slug: Mapped[str]      = mapped_column(String(32),  index=True)
+    season:      Mapped[int]      = mapped_column(Integer)
+    data_type:   Mapped[str]      = mapped_column(String(16))   # standings|fixtures|leaders
+    json_data:   Mapped[str]      = mapped_column(Text)          # full JSON payload
+    fetched_at:  Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("league_slug", "season", "data_type",
+                         name="uq_league_season_cache_key"),
+        Index("ix_league_season_cache_lookup", "league_slug", "season", "data_type"),
+    )
+
+
+class NewsArticle(Base):
+    """Rewritten news articles for the PlaySigma news feed."""
+    __tablename__ = "news_articles"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(512))
+    slug: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    source_url: Mapped[str] = mapped_column(String(1024))
+    source_name: Mapped[str] = mapped_column(String(128), default="")
+    category: Mapped[str] = mapped_column(String(64), default="football")  # football|transfers|injuries|general
+    summary: Mapped[str] = mapped_column(Text, default="")   # 1-2 sentence hook
+    body: Mapped[str] = mapped_column(Text, default="")      # rewritten full article
+    tags: Mapped[Optional[str]] = mapped_column(Text)        # comma-separated team/player names
+    image_url: Mapped[Optional[str]] = mapped_column(String(1024))
+    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    # "published" = AI-rewritten by Gemini (safe to serve publicly)
+    # "draft"     = raw scraped text only — held back until Gemini rewrites it
+    status: Mapped[str] = mapped_column(String(16), default="published", index=True)

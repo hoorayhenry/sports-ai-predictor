@@ -44,7 +44,7 @@ LEAGUES: dict[str, tuple[str, str]] = {
     "E1":  ("Championship",          "England"),
 }
 
-SEASONS = ["2122", "2223", "2324", "2425"]
+SEASONS = ["1718", "1819", "1920", "2021", "2122", "2223", "2324", "2425"]
 
 
 def _parse_date(s: str) -> Optional[datetime]:
@@ -146,6 +146,38 @@ def _parse_csv(content: str, league_name: str, country: str) -> list[dict]:
                 if n_o and 1.0 < n_o < 5.0:
                     odds_list.append({"bookmaker": bm, "market": "btts", "outcome": "no", "price": n_o, "point": None})
 
+            # ── Shot + card + referee data ──────────────────────────
+            def _si(key: str) -> int | None:
+                """Safe int from CSV cell."""
+                try:
+                    v = int(float(row.get(key) or ""))
+                    return v if v >= 0 else None
+                except (ValueError, TypeError):
+                    return None
+
+            extra: dict = {}
+            # Shots
+            for dest, keys in [
+                ("hs",  ["HS"]),
+                ("as_", ["AS"]),
+                ("hst", ["HST"]),
+                ("ast", ["AST"]),
+                # Yellow / Red cards
+                ("hy",  ["HY"]),
+                ("ay",  ["AY"]),
+                ("hr",  ["HR"]),
+                ("ar",  ["AR"]),
+            ]:
+                for k in keys:
+                    v = _si(k)
+                    if v is not None:
+                        extra[dest] = v
+                        break
+            # Referee
+            ref = row.get("Referee", "").strip()
+            if ref:
+                extra["ref"] = ref
+
             date_slug = match_date.strftime("%Y%m%d")
             h_slug = home.replace(" ", "_").lower()[:20]
             a_slug = away.replace(" ", "_").lower()[:20]
@@ -164,6 +196,7 @@ def _parse_csv(content: str, league_name: str, country: str) -> list[dict]:
                 "home_score":   home_score,
                 "away_score":   away_score,
                 "odds":         odds_list,
+                "extra":        extra,          # shots / cards / referee
             })
     except Exception as e:
         logger.error(f"CSV parse error for {league_name}: {e}")

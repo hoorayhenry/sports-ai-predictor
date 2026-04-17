@@ -13,6 +13,11 @@ from config.settings import get_settings
 from data.database import init_db
 from api.routes import sports, matches, predictions
 from api.routes import decisions as decisions_router
+from api.routes import news as news_router
+from api.routes.standings import router as standings_router
+from api.routes.teams import teams_router, players_router
+from api.routes.analytics import router as analytics_router
+from api.routes.sports_data import router as sports_data_router
 
 settings = get_settings()
 
@@ -55,11 +60,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Auto-predict error: {e}")
 
-    # Run decision engine on startup
+    # Register event loop for the live scores event bus
     try:
-        _auto_decisions()
+        from data.live_bus import register_loop
+        register_loop(asyncio.get_event_loop())
+        logger.info("Live scores event bus registered.")
     except Exception as e:
-        logger.error(f"Auto-decisions error: {e}")
+        logger.error(f"Live bus registration error: {e}")
 
     # Start background scheduler
     try:
@@ -68,6 +75,9 @@ async def lifespan(app: FastAPI):
         logger.info("Background scheduler started.")
     except Exception as e:
         logger.error(f"Scheduler start error: {e}")
+
+    # Run decision engine in the background — don't block startup
+    asyncio.get_event_loop().run_in_executor(None, _auto_decisions_safe)
 
     yield
 
@@ -84,7 +94,11 @@ def _auto_train():
     from features.engineering import build_training_matrix
     from data.database import get_sync_session
 
-    for sport_key in ["football", "basketball", "tennis"]:
+    for sport_key in [
+        "football", "basketball", "tennis", "baseball",
+        "american_football", "ice_hockey", "cricket", "rugby",
+        "handball", "volleyball",
+    ]:
         model_path = MODEL_DIR / f"{sport_key}_model.pkl"
         if model_path.exists():
             continue
@@ -147,6 +161,13 @@ def _auto_predict():
     logger.info("Auto-predict complete.")
 
 
+def _auto_decisions_safe():
+    try:
+        _auto_decisions()
+    except Exception as e:
+        logger.error(f"Auto-decisions background error: {e}")
+
+
 def _auto_decisions():
     from data.database import get_sync_session
     from betting.decision_engine import process_decisions, generate_smart_sets
@@ -184,6 +205,11 @@ app.include_router(sports.router, prefix="/api/v1")
 app.include_router(matches.router, prefix="/api/v1")
 app.include_router(predictions.router, prefix="/api/v1")
 app.include_router(decisions_router.router, prefix="/api/v1")
+app.include_router(news_router.router, prefix="/api/v1")
+app.include_router(standings_router, prefix="/api/v1")
+app.include_router(teams_router,    prefix="/api/v1")
+app.include_router(players_router,  prefix="/api/v1")
+app.include_router(analytics_router, prefix="/api/v1")
 
 
 @app.get("/api/v1/health")

@@ -14,16 +14,17 @@ export default function PredictionsPage() {
     staleTime: 60_000,
   });
 
-  const { data: matches = [], isLoading } = useQuery({
+  const { data: page, isLoading } = useQuery({
     queryKey: ["predictions-matches", sport],
-    queryFn: () => fetchMatches({ sport: sport === "all" ? undefined : sport, days: 14 }),
+    queryFn: () => fetchMatches({ sport: sport === "all" ? undefined : sport, days: 14, limit: 200 }),
     staleTime: 30_000,
-    select: (data) => data.filter((m) => m.prediction !== null),
   });
+
+  const matches = (page?.matches ?? []).filter((m) => m.prediction !== null);
 
   return (
     <div className="min-h-screen pb-20 md:pb-6 px-4 pt-6">
-      <h2 className="text-xl font-bold text-white mb-4">All Predictions</h2>
+      <h2 className="text-xl font-bold text-pi-primary font-display mb-4">All Predictions</h2>
 
       <div className="mb-4">
         <SportTabs sports={sports} selected={sport} onSelect={setSport} />
@@ -34,10 +35,9 @@ export default function PredictionsPage() {
           <Spinner size={40} />
         </div>
       ) : matches.length === 0 ? (
-        <div className="text-center py-20 text-slate-500">
+        <div className="text-center py-20 text-pi-muted">
           <p className="text-5xl mb-4">🔮</p>
           <p>No predictions available yet.</p>
-          <p className="text-xs mt-2">The AI is training on historical data…</p>
         </div>
       ) : (
         <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
