@@ -303,6 +303,31 @@ class ModelTrainingLog(Base):
     trained_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
+class LeagueSeasonCache(Base):
+    """
+    Permanent store for historical league data fetched from ESPN.
+    Keyed by (league_slug, season, data_type) — fetched ONCE, stored forever.
+    Historical data never changes so there is no need to re-fetch.
+
+    data_type values: 'standings' | 'fixtures' | 'leaders'
+    json_data: the full serialised API response dict.
+    """
+    __tablename__ = "league_season_cache"
+
+    id:          Mapped[int]      = mapped_column(primary_key=True)
+    league_slug: Mapped[str]      = mapped_column(String(32),  index=True)
+    season:      Mapped[int]      = mapped_column(Integer)
+    data_type:   Mapped[str]      = mapped_column(String(16))   # standings|fixtures|leaders
+    json_data:   Mapped[str]      = mapped_column(Text)          # full JSON payload
+    fetched_at:  Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("league_slug", "season", "data_type",
+                         name="uq_league_season_cache_key"),
+        Index("ix_league_season_cache_lookup", "league_slug", "season", "data_type"),
+    )
+
+
 class NewsArticle(Base):
     """Rewritten news articles for the PlaySigma news feed."""
     __tablename__ = "news_articles"

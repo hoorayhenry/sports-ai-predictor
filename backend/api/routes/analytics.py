@@ -681,3 +681,131 @@ def _get_feature_count() -> int:
         return len(COMMON_FEATURES)
     except Exception:
         return 50
+
+
+# ── Per-sport breakdown ───────────────────────────────────────────────────────
+
+@router.get("/sport-breakdown")
+async def sport_breakdown(db: AsyncSession = Depends(get_async_session)):
+    """
+    Accuracy, ROI, pick count, and training data volume broken down by sport.
+    Gives a holistic view of how well the AI performs across each sport.
+    """
+    from data.db_models.models import PerformanceLog, Match, Competition, Sport, ModelTrainingLog
+
+    # Performance per sport
+    perf_rows = (await db.execute(
+        select(PerformanceLog)
+        .where(
+            PerformanceLog.ai_decision == "PLAY",
+            PerformanceLog.is_correct.isnot(None),
+        )
+    )).scalars().all()
+
+    perf_by_sport: dict[str, dict] = {}
+    for r in perf_rows:
+        sk = r.sport_key or "unknown"
+        if sk not in perf_by_sport:
+            perf_by_sport[sk] = {"picks": 0, "wins": 0, "roi": 0.0}
+        perf_by_sport[sk]["picks"] += 1
+        if r.is_correct:
+            perf_by_sport[sk]["wins"] += 1
+        perf_by_sport[sk]["roi"] += r.profit_loss_units or 0
+
+    # Match counts per sport
+    match_rows = (await db.execute(
+        select(Sport.key, func.count(Match.id).label("total"),
+               func.sum(case((Match.status == "finished", 1), else_=0)).label("finished"))
+        .join(Competition, Competition.sport_id == Sport.id)
+        .join(Match, Match.competition_id == Competition.id)
+        .group_by(Sport.key)
+    )).all()
+    match_counts = {r.key: {"total": r.total, "finished": r.finished} for r in match_rows}
+
+    # Latest training log per sport
+    train_rows = (await db.execute(
+        select(ModelTrainingLog)
+        .order_by(ModelTrainingLog.trained_at.desc())
+        .limit(50)
+    )).scalars().all()
+    last_train: dict[str, dict] = {}
+    for t in train_rows:
+        if t.sport_key not in last_train:
+            last_train[t.sport_key] = {
+                "trained_at":    t.trained_at.isoformat(),
+                "training_rows": t.training_rows,
+                "accuracy":      json.loads(t.accuracy_json) if t.accuracy_json else {},
+            }
+
+    # Merge into sport summary
+    all_sports = set(list(perf_by_sport.keys()) + list(match_counts.keys()) + list(last_train.keys()))
+    result = []
+    for sk in sorted(all_sports):
+        perf = perf_by_sport.get(sk, {"picks": 0, "wins": 0, "roi": 0.0})
+        mc   = match_counts.get(sk, {"total": 0, "finished": 0})
+        tr   = last_train.get(sk)
+        picks = perf["picks"]
+        wins  = perf["wins"]
+
+        # Convert log_loss to rough accuracy % (lower log_loss = better)
+        # result market log_loss of 1.0 ≈ 33% acc (random); 0.8 ≈ ~55%
+        model_accuracy = None
+        if tr and tr["accuracy"].get("result") is not None:
+            ll = float(tr["accuracy"]["result"])
+            # Heuristic conversion: log_loss 1.0 → 33%, 0.5 → 65%, 0.3 → 80%
+            model_accuracy = max(0.0, min(1.0, 1.0 - (ll / 1.5)))
+
+        result.append({
+            "sport":           sk,
+            "display_name":    sk.replace("_", " ").title(),
+            "matches_total":   mc["total"],
+            "matches_finished": mc["finished"],
+            "picks":           picks,
+            "wins":            wins,
+            "accuracy":        round(wins / picks, 4) if picks > 0 else None,
+            "roi":             round(perf["roi"], 2),
+            "model_accuracy":  round(model_accuracy, 4) if model_accuracy is not None else None,
+            "training_rows":   tr["training_rows"] if tr else 0,
+            "last_trained":    tr["trained_at"] if tr else None,
+        })
+
+    # Sort: sports with most training data first
+    result.sort(key=lambda x: -(x["training_rows"] or 0))
+    return {"data": result}
+
+
+# ── Learning curve ────────────────────────────────────────────────────────────
+
+@router.get("/learning-curve")
+async def learning_curve(db: AsyncSession = Depends(get_async_session)):
+    """
+    Shows how model accuracy improves over time as more data is consumed.
+    Uses ModelTrainingLog — each weekly retrain is one data point.
+    Returns {sport -> [{trained_at, training_rows, log_loss_result, log_loss_over25, log_loss_btts}]}
+    """
+    from data.db_models.models import ModelTrainingLog
+
+    logs = (await db.execute(
+        select(ModelTrainingLog)
+        .where(ModelTrainingLog.status == "trained")
+        .order_by(ModelTrainingLog.trained_at)
+    )).scalars().all()
+
+    by_sport: dict[str, list] = {}
+    for log in logs:
+        sk = log.sport_key
+        if sk not in by_sport:
+            by_sport[sk] = []
+        acc = json.loads(log.accuracy_json) if log.accuracy_json else {}
+        by_sport[sk].append({
+            "trained_at":    log.trained_at.isoformat(),
+            "training_rows": log.training_rows,
+            "ll_result":     round(acc.get("result",  1.0), 4) if acc.get("result")  is not None else None,
+            "ll_over25":     round(acc.get("over25",  1.0), 4) if acc.get("over25")  is not None else None,
+            "ll_btts":       round(acc.get("btts",    1.0), 4) if acc.get("btts")    is not None else None,
+            # Rough accuracy estimate from log_loss (lower is better)
+            "accuracy_est":  round(max(0.0, min(1.0, 1.0 - (acc.get("result", 1.0) / 1.5))), 4)
+                             if acc.get("result") is not None else None,
+        })
+
+    return {"data": by_sport, "sports": list(by_sport.keys())}

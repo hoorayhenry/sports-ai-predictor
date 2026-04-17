@@ -5,7 +5,6 @@ ESPN: no API key, no daily quota, updates within minutes of match completion.
 API-Football: used only for past seasons, cached for 30 days (historical data never changes).
 """
 from __future__ import annotations
-import time
 import concurrent.futures
 import httpx
 from fastapi import APIRouter, Query, HTTPException
@@ -73,17 +72,106 @@ LEAGUE_API_IDS: dict[str, int] = {
     "uefa.europa.conf": 848,
 }
 
-# In-memory caches
-_ESPN_CACHE:     dict[str, dict] = {}    # slug → {data, ts}
-_AF_CACHE:       dict[str, dict] = {}    # "slug:season" → {data, ts}
-_FIXTURES_CACHE: dict[str, dict] = {}    # "fixtures:{slug}" → {data, ts}
-_NEWS_CACHE:     dict[str, dict] = {}    # "news:{slug}" → {data, ts}
-_LEADERS_CACHE:  dict[str, dict] = {}    # "leaders:{slug}" → {data, ts}
-_ESPN_TTL     = 300             # 5 minutes — real-time
-_AF_TTL       = 30 * 24 * 3600  # 30 days — historical data never changes
-_FIXTURES_TTL = 120             # 2 minutes — fixtures update on match days
-_NEWS_TTL     = 600             # 10 minutes
-_LEADERS_TTL  = 1800            # 30 minutes — stats don't change that fast
+# Sentinel season for news (no season concept — news is always current)
+_NEWS_SEASON = 0
+
+
+# ── DB helpers — permanent storage for all data ───────────────────────────────
+
+async def _db_get(
+    league_slug: str, season: int, data_type: str,
+    max_age_s: int | None = None,
+) -> dict | None:
+    """
+    Return cached JSON payload from DB, or None when:
+      - no row found, OR
+      - max_age_s is set and the row is older than max_age_s seconds.
+
+    max_age_s=None  → accept any age (historical data never changes).
+    max_age_s=N     → return None when data is stale (current season live data).
+    """
+    import json as _json
+    from datetime import datetime as _dt
+    from data.database import AsyncSessionLocal
+    from data.db_models.models import LeagueSeasonCache
+    from sqlalchemy import select
+    try:
+        async with AsyncSessionLocal() as db:
+            row = await db.execute(
+                select(LeagueSeasonCache).where(
+                    LeagueSeasonCache.league_slug == league_slug,
+                    LeagueSeasonCache.season      == season,
+                    LeagueSeasonCache.data_type   == data_type,
+                )
+            )
+            rec = row.scalar_one_or_none()
+            if rec:
+                if max_age_s is not None:
+                    age = (_dt.utcnow() - rec.fetched_at).total_seconds()
+                    if age > max_age_s:
+                        return None  # stale — caller will re-fetch
+                return _json.loads(rec.json_data)
+    except Exception:
+        pass
+    return None
+
+
+async def _db_put(league_slug: str, season: int, data_type: str, payload: dict) -> None:
+    """Async upsert — used by FastAPI routes (async context)."""
+    import json as _json
+    from data.database import AsyncSessionLocal
+    from data.db_models.models import LeagueSeasonCache
+    from sqlalchemy import select
+    from datetime import datetime as _dt
+    try:
+        async with AsyncSessionLocal() as db:
+            row = await db.execute(
+                select(LeagueSeasonCache).where(
+                    LeagueSeasonCache.league_slug == league_slug,
+                    LeagueSeasonCache.season      == season,
+                    LeagueSeasonCache.data_type   == data_type,
+                )
+            )
+            rec = row.scalar_one_or_none()
+            if rec:
+                rec.json_data  = _json.dumps(payload)
+                rec.fetched_at = _dt.utcnow()
+            else:
+                db.add(LeagueSeasonCache(
+                    league_slug = league_slug,
+                    season      = season,
+                    data_type   = data_type,
+                    json_data   = _json.dumps(payload),
+                ))
+            await db.commit()
+    except Exception:
+        pass
+
+
+def _db_put_sync(league_slug: str, season: int, data_type: str, payload: dict) -> None:
+    """Sync upsert — used by the BackgroundScheduler (runs in a thread, not async)."""
+    import json as _json
+    from data.database import get_sync_session
+    from data.db_models.models import LeagueSeasonCache
+    from datetime import datetime as _dt
+    try:
+        with get_sync_session() as db:
+            rec = db.query(LeagueSeasonCache).filter_by(
+                league_slug=league_slug, season=season, data_type=data_type
+            ).first()
+            if rec:
+                rec.json_data  = _json.dumps(payload)
+                rec.fetched_at = _dt.utcnow()
+            else:
+                db.add(LeagueSeasonCache(
+                    league_slug = league_slug,
+                    season      = season,
+                    data_type   = data_type,
+                    json_data   = _json.dumps(payload),
+                ))
+            db.commit()
+    except Exception:
+        pass
 
 
 # ── ESPN parsers ──────────────────────────────────────────────────────────────
@@ -293,9 +381,9 @@ async def get_standings(
     season: int = Query(CURRENT_SEASON),
 ):
     """
-    Get league standings for any season.
-    Primary source: ESPN (free, no key, supports all seasons back to ~2010).
-    Fallback:       API-Football (only if ESPN returns empty AND key is available).
+    Standings for any season.
+    Historical (non-current): DB-first — fetch from ESPN once, store permanently.
+    Current season: in-memory cache, refreshed every 5 minutes.
     """
     if slug not in _SLUG_META:
         raise HTTPException(400, f"Unknown league: '{slug}'. Check /standings/leagues.")
@@ -303,54 +391,37 @@ async def get_standings(
     import asyncio
     from functools import partial
 
-    is_current   = season == CURRENT_SEASON
-    espn_ttl     = _ESPN_TTL if is_current else _AF_TTL   # historical data never changes
-    cache_key    = f"{slug}:{season}"
+    is_current = season == CURRENT_SEASON
 
-    # ── ESPN (works for ALL seasons — current and historical) ─────
-    espn_cached = _ESPN_CACHE.get(cache_key)
-    if espn_cached and (time.time() - espn_cached["ts"]) < espn_ttl:
-        r = dict(espn_cached["data"])
-        r["cached"] = True
-        return r
+    # ── Historical: permanent DB storage ────────────────────────────
+    if not is_current:
+        stored = await _db_get(slug, season, "standings")
+        if stored:
+            return {**stored, "source": "db"}
 
-    result = await asyncio.get_event_loop().run_in_executor(
-        None, partial(_fetch_espn, slug, season)
-    )
+        # Not in DB yet — fetch from ESPN and persist
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, partial(_fetch_espn, slug, season)
+        )
+        if result:
+            await _db_put(slug, season, "standings", result)
+            return {**result, "source": "espn_saved"}
 
+        raise HTTPException(503, f"Could not fetch {season} standings for {slug}.")
+
+    # ── Current season: DB only (scheduler keeps it fresh every 5 min) ──
+    stored = await _db_get(slug, CURRENT_SEASON, "standings")
+    if stored:
+        return stored
+
+    # DB empty — scheduler hasn't warmed up yet (first startup).
+    # Do a one-time direct fetch so the user isn't left with an error.
+    result = await asyncio.get_event_loop().run_in_executor(None, partial(_fetch_espn, slug, season))
     if result:
-        _ESPN_CACHE[cache_key] = {"data": result, "ts": time.time()}
+        await _db_put(slug, CURRENT_SEASON, "standings", result)
         return result
 
-    # ── Stale ESPN cache is better than nothing ───────────────────
-    if espn_cached:
-        r = dict(espn_cached["data"])
-        r["cached"] = True
-        r["stale"]  = True
-        return r
-
-    # ── Optional API-Football fallback (historical only) ──────────
-    if not is_current:
-        try:
-            from config.settings import get_settings
-            settings = get_settings()
-            if settings.api_football_key:
-                af_cached = _AF_CACHE.get(cache_key)
-                if af_cached and (time.time() - af_cached["ts"]) < _AF_TTL:
-                    r = dict(af_cached["data"])
-                    r["cached"] = True
-                    return r
-
-                af_result = await asyncio.get_event_loop().run_in_executor(
-                    None, partial(_fetch_api_football, slug, season, settings.api_football_key)
-                )
-                if af_result:
-                    _AF_CACHE[cache_key] = {"data": af_result, "ts": time.time()}
-                    return af_result
-        except Exception:
-            pass
-
-    raise HTTPException(503, f"Could not fetch {season} standings for {slug}. Please try again.")
+    raise HTTPException(503, f"Could not fetch standings for {slug}.")
 
 
 # ── Scoreboard / Fixtures ─────────────────────────────────────────────────────
@@ -427,13 +498,35 @@ def _parse_scoreboard_event(e: dict, slug: str) -> dict:
     }
 
 
-def _fetch_league_fixtures(slug: str, days_back: int = 4, days_ahead: int = 14) -> dict:
+def _fetch_league_fixtures(slug: str, season: int = CURRENT_SEASON,
+                           days_back: int = 4, days_ahead: int = 14) -> dict:
     """
-    Fetch recent + upcoming fixtures by querying ESPN scoreboard in parallel
-    for each date in the range. More reliable than a single range call.
+    Current season: parallel per-date ESPN calls (exact live state).
+    Historical season: single ESPN scoreboard call with full-season date range
+    (ESPN returns up to 500 events per call — enough for any full season).
     """
     from datetime import datetime, timedelta
 
+    if season != CURRENT_SEASON:
+        # Full historical season in one call
+        # European seasons run Aug–Jun; use Jul 1 → Jun 30 to be safe
+        from_date = f"{season}0701"
+        to_date   = f"{season + 1}0630"
+        try:
+            resp = httpx.get(
+                f"{_ESPN_SITE}/{slug}/scoreboard",
+                params={"dates": f"{from_date}-{to_date}", "limit": 500},
+                headers=_BROWSER_HEADERS,
+                timeout=20,
+            )
+            events = resp.json().get("events", []) if resp.status_code == 200 else []
+        except Exception:
+            events = []
+        fixtures = [_parse_scoreboard_event(e, slug) for e in events]
+        fixtures.sort(key=lambda x: x["date"])
+        return {"fixtures": fixtures, "slug": slug, "total": len(fixtures), "season": season}
+
+    # Current season — parallel per-date fetch (preserves live state)
     today = datetime.utcnow().date()
     dates = (
         [(today - timedelta(days=i)).strftime("%Y%m%d") for i in range(days_back, 0, -1)]
@@ -460,9 +553,8 @@ def _fetch_league_fixtures(slug: str, days_back: int = 4, days_ahead: int = 14) 
             for results in pool.map(_fetch_one, dates, timeout=20):
                 all_fixtures.extend(results)
     except Exception:
-        pass  # partial results are better than nothing
+        pass
 
-    # Deduplicate by ESPN event ID, then sort chronologically
     seen: set = set()
     unique: list[dict] = []
     for f in all_fixtures:
@@ -471,25 +563,48 @@ def _fetch_league_fixtures(slug: str, days_back: int = 4, days_ahead: int = 14) 
             unique.append(f)
 
     unique.sort(key=lambda x: x["date"])
-    return {"fixtures": unique, "slug": slug, "total": len(unique)}
+    return {"fixtures": unique, "slug": slug, "total": len(unique), "season": season}
 
 
 @router.get("/fixtures")
-async def get_league_fixtures(slug: str = Query("eng.1")):
-    """League fixtures (recent results + upcoming) from ESPN scoreboard."""
+async def get_league_fixtures(
+    slug:   str = Query("eng.1"),
+    season: int = Query(CURRENT_SEASON),
+):
+    """
+    Fixtures for any season.
+    Historical: DB-first, all 380 matches stored permanently after first fetch.
+    Current: in-memory 2-min cache (live scores change frequently).
+    """
     import asyncio
+    from functools import partial
     if slug not in _SLUG_META:
         raise HTTPException(400, f"Unknown league: '{slug}'")
 
-    cache_key = f"fixtures:{slug}"
-    cached    = _FIXTURES_CACHE.get(cache_key)
-    if cached and (time.time() - cached["ts"]) < _FIXTURES_TTL:
-        return {**cached["data"], "cached": True}
+    is_historical = season != CURRENT_SEASON
 
+    # ── Historical: permanent DB storage ────────────────────────────
+    if is_historical:
+        stored = await _db_get(slug, season, "fixtures")
+        if stored:
+            return {**stored, "source": "db"}
+
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, partial(_fetch_league_fixtures, slug, season)
+        )
+        await _db_put(slug, season, "fixtures", result)
+        return {**result, "source": "espn_saved"}
+
+    # ── Current season: DB only (scheduler keeps it fresh every 5 min) ──
+    stored = await _db_get(slug, CURRENT_SEASON, "fixtures")
+    if stored:
+        return stored
+
+    # Warmup fallback — first startup before scheduler has run
     result = await asyncio.get_event_loop().run_in_executor(
-        None, _fetch_league_fixtures, slug
+        None, partial(_fetch_league_fixtures, slug, season)
     )
-    _FIXTURES_CACHE[cache_key] = {"data": result, "ts": time.time()}
+    await _db_put(slug, CURRENT_SEASON, "fixtures", result)
     return result
 
 
@@ -528,26 +643,31 @@ async def get_league_news(slug: str = Query("eng.1")):
     if slug not in _SLUG_META:
         raise HTTPException(400, f"Unknown league: '{slug}'")
 
-    cache_key = f"news:{slug}"
-    cached    = _NEWS_CACHE.get(cache_key)
-    if cached and (time.time() - cached["ts"]) < _NEWS_TTL:
-        return {"articles": cached["data"], "cached": True}
+    # News has no season concept — use _NEWS_SEASON=0 as sentinel key.
+    # Scheduler refreshes every 30 min; route reads DB only.
+    stored = await _db_get(slug, _NEWS_SEASON, "news")
+    if stored:
+        return stored
 
-    result = await asyncio.get_event_loop().run_in_executor(None, _fetch_league_news, slug)
-    _NEWS_CACHE[cache_key] = {"data": result, "ts": time.time()}
-    return {"articles": result}
+    # Warmup fallback
+    articles = await asyncio.get_event_loop().run_in_executor(None, _fetch_league_news, slug)
+    payload = {"articles": articles}
+    await _db_put(slug, _NEWS_SEASON, "news", payload)
+    return payload
 
 
 # ── League Leaders (top scorers / stats) ──────────────────────────────────────
 
-def _fetch_league_leaders(slug: str) -> list[dict]:
+def _fetch_league_leaders(slug: str, season: int = CURRENT_SEASON) -> list[dict]:
     """
     Fetch top statistical leaders (Goals, Assists) from ESPN's /statistics endpoint.
-    Confirmed working: returns full inline athlete objects, no $ref resolution needed.
+    Supports historical seasons via ?season=YYYY parameter.
     """
     try:
+        params = {"season": season} if season != CURRENT_SEASON else {}
         resp = httpx.get(
             f"{_ESPN_SITE}/{slug}/statistics",
+            params=params,
             headers=_BROWSER_HEADERS,
             timeout=12,
         )
@@ -584,20 +704,47 @@ def _fetch_league_leaders(slug: str) -> list[dict]:
 
 
 @router.get("/leaders")
-async def get_league_leaders(slug: str = Query("eng.1")):
-    """Top statistical leaders (scorers, assists, etc.) for a league from ESPN."""
+async def get_league_leaders(
+    slug:   str = Query("eng.1"),
+    season: int = Query(CURRENT_SEASON),
+):
+    """
+    Top statistical leaders for any season.
+    Historical: DB-first, stored permanently after first fetch.
+    Current: in-memory 30-min cache.
+    """
     import asyncio
+    from functools import partial
     if slug not in _SLUG_META:
         raise HTTPException(400, f"Unknown league: '{slug}'")
 
-    cache_key = f"leaders:{slug}"
-    cached    = _LEADERS_CACHE.get(cache_key)
-    if cached and (time.time() - cached["ts"]) < _LEADERS_TTL:
-        return {"categories": cached["data"], "cached": True}
+    is_historical = season != CURRENT_SEASON
 
-    result = await asyncio.get_event_loop().run_in_executor(None, _fetch_league_leaders, slug)
-    _LEADERS_CACHE[cache_key] = {"data": result, "ts": time.time()}
-    return {"categories": result}
+    # ── Historical: permanent DB storage ────────────────────────────
+    if is_historical:
+        stored = await _db_get(slug, season, "leaders")
+        if stored:
+            return {**stored, "source": "db"}
+
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, partial(_fetch_league_leaders, slug, season)
+        )
+        payload = {"categories": result}
+        await _db_put(slug, season, "leaders", payload)
+        return {**payload, "source": "espn_saved"}
+
+    # ── Current season: DB only (scheduler refreshes every 30 min) ──
+    stored = await _db_get(slug, CURRENT_SEASON, "leaders")
+    if stored:
+        return stored
+
+    # Warmup fallback
+    result = await asyncio.get_event_loop().run_in_executor(
+        None, partial(_fetch_league_leaders, slug, season)
+    )
+    payload = {"categories": result}
+    await _db_put(slug, CURRENT_SEASON, "leaders", payload)
+    return payload
 
 
 @router.get("/leagues")

@@ -223,6 +223,42 @@ def job_fetch_intelligence():
         logger.error(f"[SCHEDULER] Intelligence job failed: {e}")
 
 
+def job_ingest_multi_sport_history():
+    """
+    Incremental multi-sport historical data ingestion via Sofascore + ESPN.
+    Fetches all sports (football, basketball, tennis, baseball, NFL, NHL, cricket,
+    rugby, handball, volleyball) for dates not yet in the DB.
+    Runs daily at 02:00 UTC — off-peak, before the weekly retrain.
+    More data in DB = better ML predictions across all sports.
+    """
+    logger.info("[SCHEDULER] Starting multi-sport historical ingestion...")
+    try:
+        from data.database import get_sync_session
+        from data.loaders.multi_sport_ingest import (
+            run_full_multi_sport_ingest, run_espn_historical_ingest
+        )
+
+        with get_sync_session() as db:
+            # Sofascore: fetch last 7 days of new data (incremental)
+            ss_results = run_full_multi_sport_ingest(db, days_back=7)
+
+        with get_sync_session() as db:
+            # ESPN: supplement US sports with last 3 seasons
+            from datetime import datetime as _dt
+            current_year = _dt.utcnow().year
+            espn_results = run_espn_historical_ingest(
+                db, seasons=list(range(current_year - 2, current_year + 1))
+            )
+
+        total = sum(ss_results.values()) + sum(espn_results.values())
+        logger.info(
+            f"[SCHEDULER] Multi-sport ingest complete: {total} new matches. "
+            f"Breakdown: {ss_results}"
+        )
+    except Exception as e:
+        logger.error(f"[SCHEDULER] Multi-sport ingest failed: {e}")
+
+
 def job_retrain_models():
     """
     Weekly continuous learning: retrain all sport models on accumulated DB data.
@@ -270,28 +306,108 @@ def job_fetch_news():
 
 def job_live_scores():
     """
-    Fetch live match scores from ESPN (no auth) and update the DB.
-    Runs every 60 seconds — ESPN updates ~every 30s, so this stays fresh.
-    Falls back to API-Football if ESPN returns nothing.
+    Fetch live match scores from Sofascore (primary) + ESPN fallback and update the DB.
+    Adaptive rate: reschedules itself at 30s when matches are live (Sofascore cadence),
+    5 min when idle. SSE bus pushes changes to connected clients immediately.
     """
     logger.info("[SCHEDULER] Updating live scores via ESPN...")
+    live_count = 0
     try:
         from data.database import get_sync_session
-        from data.live_scores import update_live_scores
+        from data.live_scores import update_live_scores, fetch_live_fixtures_espn
 
-        # Pass api_key as fallback only — ESPN needs no key
         api_key = settings.api_football_key
 
         with get_sync_session() as db:
-            n = update_live_scores(db, api_key)
-        logger.info(f"[SCHEDULER] Live scores: {n} matches updated")
+            live_count = update_live_scores(db, api_key)
+        logger.info(f"[SCHEDULER] Live scores: {live_count} matches updated")
 
-        # Notify SSE connections immediately — don't wait for their 60s heartbeat
-        if n > 0:
+        if live_count > 0:
             from data.live_bus import notify
-            notify(n)
+            notify(live_count)
     except Exception as e:
         logger.error(f"[SCHEDULER] Live scores job failed: {e}")
+    finally:
+        # Adaptive interval: poll every 30s during live matches (Sofascore updates every 20-30s),
+        # every 5 min when no live matches to avoid unnecessary polling.
+        global _scheduler
+        if _scheduler and _scheduler.running:
+            next_interval = 30 if live_count > 0 else 300
+            try:
+                _scheduler.reschedule_job(
+                    "live_scores",
+                    trigger=IntervalTrigger(seconds=next_interval),
+                )
+            except Exception:
+                pass
+
+
+def job_refresh_clubs_data():
+    """
+    Refresh standings and fixtures for all leagues in the Clubs tab.
+    Scheduler runs this every 5 min so routes always read from DB — no per-user ESPN calls.
+    Runs immediately on startup (next_run_time=now) to warm the DB before first user hit.
+    """
+    logger.info("[SCHEDULER] Refreshing Clubs standings + fixtures...")
+    try:
+        from api.routes.standings import (
+            LEAGUES, CURRENT_SEASON,
+            _fetch_espn, _fetch_league_fixtures, _db_put_sync,
+        )
+
+        refreshed = 0
+        for slug, name, _country, _flag in LEAGUES:
+            # Standings
+            try:
+                result = _fetch_espn(slug, CURRENT_SEASON)
+                if result:
+                    _db_put_sync(slug, CURRENT_SEASON, "standings", result)
+                    refreshed += 1
+            except Exception as e:
+                logger.debug(f"[SCHEDULER] Standings refresh failed {slug}: {e}")
+
+            # Fixtures (4 days back, 14 ahead)
+            try:
+                result = _fetch_league_fixtures(slug, CURRENT_SEASON)
+                if result:
+                    _db_put_sync(slug, CURRENT_SEASON, "fixtures", result)
+                    refreshed += 1
+            except Exception as e:
+                logger.debug(f"[SCHEDULER] Fixtures refresh failed {slug}: {e}")
+
+        logger.info(f"[SCHEDULER] Clubs data: {refreshed} datasets refreshed")
+    except Exception as e:
+        logger.error(f"[SCHEDULER] Clubs data refresh failed: {e}")
+
+
+def job_refresh_clubs_news_leaders():
+    """
+    Refresh league news and top scorers for all leagues.
+    Runs every 30 min — less time-sensitive than standings/fixtures.
+    """
+    logger.info("[SCHEDULER] Refreshing Clubs news + leaders...")
+    try:
+        from api.routes.standings import (
+            LEAGUES, CURRENT_SEASON, _NEWS_SEASON,
+            _fetch_league_news, _fetch_league_leaders, _db_put_sync,
+        )
+
+        for slug, _, _, _ in LEAGUES:
+            try:
+                articles = _fetch_league_news(slug)
+                _db_put_sync(slug, _NEWS_SEASON, "news", {"articles": articles})
+            except Exception as e:
+                logger.debug(f"[SCHEDULER] News refresh failed {slug}: {e}")
+
+            try:
+                leaders = _fetch_league_leaders(slug, CURRENT_SEASON)
+                _db_put_sync(slug, CURRENT_SEASON, "leaders", {"categories": leaders})
+            except Exception as e:
+                logger.debug(f"[SCHEDULER] Leaders refresh failed {slug}: {e}")
+
+        logger.info("[SCHEDULER] Clubs news + leaders refreshed")
+    except Exception as e:
+        logger.error(f"[SCHEDULER] Clubs news/leaders refresh failed: {e}")
 
 
 def job_retry_drafts():
@@ -420,13 +536,35 @@ def start_scheduler():
     global _scheduler
     _scheduler = BackgroundScheduler(timezone="UTC")
 
-    # Live scores every 60 seconds — ESPN source, no quota concerns
+    # Live scores — adaptive: 30s when matches are live (Sofascore updates every 20-30s),
+    # 5 min when no live matches. SSE pushes score changes to clients immediately.
     _scheduler.add_job(
         job_live_scores,
-        IntervalTrigger(seconds=60),
+        IntervalTrigger(seconds=30),
         id="live_scores",
         replace_existing=True,
-        misfire_grace_time=30,
+        misfire_grace_time=15,
+        next_run_time=datetime.utcnow(),
+    )
+
+    # Clubs standings + fixtures — every 5 min, warm DB immediately on startup
+    _scheduler.add_job(
+        job_refresh_clubs_data,
+        IntervalTrigger(minutes=5),
+        id="refresh_clubs_data",
+        replace_existing=True,
+        misfire_grace_time=120,
+        next_run_time=datetime.utcnow(),   # fire immediately so first user hits warm DB
+    )
+
+    # Clubs news + top scorers — every 30 min, warm DB immediately on startup
+    _scheduler.add_job(
+        job_refresh_clubs_news_leaders,
+        IntervalTrigger(minutes=30),
+        id="refresh_clubs_news_leaders",
+        replace_existing=True,
+        misfire_grace_time=300,
+        next_run_time=datetime.utcnow(),
     )
 
     # Intelligence signals every 30 minutes (real-time news/injury tracking)
@@ -500,7 +638,16 @@ def start_scheduler():
         misfire_grace_time=300,
     )
 
-    # Weekly model retraining — Sunday 03:00 UTC
+    # Multi-sport historical data ingestion — daily at 02:00 UTC
+    # Feeds the ML model with fresh data from Sofascore + ESPN across all sports
+    _scheduler.add_job(
+        job_ingest_multi_sport_history,
+        CronTrigger(hour=2, minute=0),
+        id="ingest_multi_sport",
+        replace_existing=True,
+    )
+
+    # Weekly model retraining — Sunday 03:00 UTC (after daily ingest finishes)
     _scheduler.add_job(
         job_retrain_models,
         CronTrigger(day_of_week="sun", hour=3, minute=0),

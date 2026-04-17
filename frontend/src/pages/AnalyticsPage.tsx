@@ -112,6 +112,17 @@ interface CalPoint   { bucket_label: string; bucket_mid: number; predicted_avg: 
 interface Feature    { feature: string; importance: number; group: string; label: string }
 interface Signal     { id: number; team: string; type: string; entity: string; impact: number; confidence: number; time: string }
 interface HistBucket { range: string; count: number }
+interface SportRow   {
+  sport: string; display_name: string;
+  matches_total: number; matches_finished: number;
+  picks: number; wins: number;
+  accuracy: number | null; roi: number;
+  model_accuracy: number | null; training_rows: number; last_trained: string | null;
+}
+interface LearningPoint {
+  trained_at: string; training_rows: number;
+  ll_result: number | null; accuracy_est: number | null;
+}
 
 // ── Recharts formatter helpers (typed to avoid ValueType | undefined errors) ──
 type Fmt = (v: ValueType | undefined, name: NameType | undefined) => [string, string] | [string];
@@ -221,6 +232,9 @@ export default function AnalyticsPage() {
   const histogram     = q<{histogram: HistBucket[], play_count: number, skip_count: number, play_rate: number | null}>
                           ("an-hist",     "/analytics/confidence-histogram",  120_000);
   const health        = q<any>              ("an-health",       "/analytics/model-health",          300_000);
+  const sportBreakdown = q<{data: SportRow[]}>("an-sport-bd",  "/analytics/sport-breakdown",        300_000);
+  const learningCurve  = q<{data: Record<string, LearningPoint[]>, sports: string[]}>(
+                          "an-learn",          "/analytics/learning-curve",         600_000);
 
   const retrain = useMutation({
     mutationFn: () => api.post("/decisions/analytics/trigger-retrain"),
@@ -230,6 +244,13 @@ export default function AnalyticsPage() {
   const ov = overview.data;
   const tl = timeline.data?.data ?? [];
   const rl = roiTl.data?.data   ?? [];
+
+  // ── Sport emoji map ────────────────────────────────────────────────
+  const SPORT_ICONS: Record<string, string> = {
+    football: "⚽", basketball: "🏀", tennis: "🎾", baseball: "⚾",
+    american_football: "🏈", ice_hockey: "🏒", cricket: "🏏",
+    rugby: "🏉", handball: "🤾", volleyball: "🏐",
+  };
 
   // ── Accuracy colour ────────────────────────────────────────────────
   function accColor(v: number | null | undefined) {
@@ -316,7 +337,133 @@ export default function AnalyticsPage() {
         </div>
       )}
 
-      {/* ── 2. Accuracy + ROI timelines ─────────────────────────────── */}
+      {/* ── 2. Sport-by-Sport AI Performance ──────────────────────── */}
+      <div className="card p-5 mb-6">
+        <SectionHeader
+          icon={<Brain size={14} className="text-pi-indigo-light" />}
+          title="AI Performance by Sport"
+          sub="Prediction accuracy, training data volume and model confidence across every sport"
+        />
+        {!sportBreakdown.data?.data?.length ? (
+          <EmptyChart message="Sport breakdown will populate as matches are ingested and predictions resolve. Daily ingestion runs at 02:00 UTC." />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-pi-border/20">
+                  <th className="text-left text-[11px] text-pi-muted font-semibold pb-2 pr-4">Sport</th>
+                  <th className="text-right text-[11px] text-pi-muted font-semibold pb-2 px-3">Training Data</th>
+                  <th className="text-right text-[11px] text-pi-muted font-semibold pb-2 px-3">Picks</th>
+                  <th className="text-right text-[11px] text-pi-muted font-semibold pb-2 px-3">Pick Acc.</th>
+                  <th className="text-right text-[11px] text-pi-muted font-semibold pb-2 px-3">Model Acc.</th>
+                  <th className="text-right text-[11px] text-pi-muted font-semibold pb-2 px-3">ROI</th>
+                  <th className="text-left text-[11px] text-pi-muted font-semibold pb-2 pl-4">Progress</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sportBreakdown.data.data.map((s) => {
+                  const modelAcc = s.model_accuracy;
+                  const pickAcc  = s.accuracy;
+                  // Progress bar based on training data (50k rows = full bar)
+                  const progress = Math.min(100, (s.training_rows / 50_000) * 100);
+                  return (
+                    <tr key={s.sport} className="border-b border-pi-border/10 last:border-0 hover:bg-white/2">
+                      <td className="py-2.5 pr-4">
+                        <div className="flex items-center gap-2">
+                          <span className="text-base">{SPORT_ICONS[s.sport] ?? "🏆"}</span>
+                          <span className="font-semibold text-white">{s.display_name}</span>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 text-right">
+                        <span className="text-pi-primary font-medium">{s.training_rows.toLocaleString()}</span>
+                        <span className="text-[10px] text-pi-muted ml-1">rows</span>
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-pi-secondary">{s.picks}</td>
+                      <td className="py-2.5 px-3 text-right font-semibold" style={{ color: accColor(pickAcc) }}>
+                        {pct(pickAcc)}
+                      </td>
+                      <td className="py-2.5 px-3 text-right font-semibold" style={{ color: accColor(modelAcc) }}>
+                        {modelAcc != null ? pct(modelAcc) : <span className="text-pi-muted text-[11px]">no model</span>}
+                      </td>
+                      <td className="py-2.5 px-3 text-right" style={{ color: s.roi >= 0 ? C.emerald : C.rose }}>
+                        {s.roi > 0 ? "+" : ""}{s.roi.toFixed(1)}u
+                      </td>
+                      <td className="py-2.5 pl-4">
+                        <div className="flex items-center gap-2">
+                          <div className="w-24 h-1.5 bg-pi-surface rounded-full overflow-hidden">
+                            <div
+                              className="h-1.5 rounded-full transition-all"
+                              style={{
+                                width: `${progress}%`,
+                                background: progress >= 80 ? C.emerald : progress >= 40 ? C.amber : C.indigo,
+                              }}
+                            />
+                          </div>
+                          <span className="text-[10px] text-pi-muted">{progress.toFixed(0)}%</span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <p className="text-[10px] text-pi-muted mt-3">
+              Progress bar = training data vs 50,000 row target. More data = higher accuracy. Daily ingestion adds new matches automatically.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* ── 3. Learning Curve ───────────────────────────────────────── */}
+      <div className="card p-5 mb-6">
+        <SectionHeader
+          icon={<TrendingUp size={14} className="text-pi-emerald" />}
+          title="AI Learning Curve"
+          sub="Model accuracy improving over time as more data is consumed — each point is one retraining run"
+        />
+        {!learningCurve.data?.sports?.length ? (
+          <EmptyChart message="Learning curve appears after the first model retraining. Auto-retrains every Sunday at 03:00 UTC." />
+        ) : (
+          <div className="grid md:grid-cols-2 gap-5">
+            {learningCurve.data.sports.slice(0, 6).map(sport => {
+              const pts = learningCurve.data!.data[sport] ?? [];
+              if (!pts.length) return null;
+              return (
+                <div key={sport}>
+                  <p className="text-xs font-semibold text-pi-primary mb-2 flex items-center gap-2">
+                    <span>{SPORT_ICONS[sport] ?? "🏆"}</span>
+                    {sport.replace("_", " ").replace(/\b\w/g, c => c.toUpperCase())}
+                    <span className="text-pi-muted font-normal">({pts.length} runs)</span>
+                  </p>
+                  <ResponsiveContainer width="100%" height={140}>
+                    <ComposedChart data={pts} margin={{ top: 4, right: 4, left: -24, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+                      <XAxis dataKey="trained_at" tickFormatter={v => v.slice(5, 10)} tick={{ fontSize: 9, fill: C.muted }} />
+                      <YAxis
+                        tickFormatter={v => `${(v * 100).toFixed(0)}%`}
+                        tick={{ fontSize: 9, fill: C.muted }}
+                        domain={[0.3, 1]}
+                      />
+                      <Tooltip
+                        {...TP}
+                        formatter={(v: ValueType | undefined, name: NameType | undefined) => [
+                          `${((v as number ?? 0) * 100).toFixed(1)}%`,
+                          name === "accuracy_est" ? "Est. Accuracy" : String(name),
+                        ]}
+                        labelFormatter={(l) => `Trained ${l}`}
+                      />
+                      <ReferenceLine y={0.55} stroke={C.amber} strokeDasharray="4 4" />
+                      <Area dataKey="accuracy_est" stroke={C.emerald} fill={C.emerald} fillOpacity={0.1} strokeWidth={2} dot={{ fill: C.emerald, r: 2 }} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* ── 4. Accuracy + ROI timelines ─────────────────────────────── */}
       <div className="grid md:grid-cols-2 gap-5 mb-6">
 
         {/* Accuracy timeline */}
@@ -763,7 +910,7 @@ export default function AnalyticsPage() {
             <div className="space-y-2">
               {health.data.model_files.map((m: any, i: number) => (
                 <div key={i} className="flex items-center gap-3 py-2 border-b border-pi-border/20 last:border-0">
-                  <span className="text-lg">{{ football:"⚽", basketball:"🏀", tennis:"🎾" }[m.sport as string] ?? "🏆"}</span>
+                  <span className="text-lg">{SPORT_ICONS[m.sport as string] ?? "🏆"}</span>
                   <div className="flex-1">
                     <p className="text-sm font-semibold text-white capitalize">{m.sport}</p>
                     <p className="text-xs text-slate-400">{m.size_kb} KB · updated {timeAgo(m.modified)}</p>
@@ -795,7 +942,7 @@ export default function AnalyticsPage() {
                 const resultAcc = acc?.result;
                 return (
                   <div key={l.id} className="flex items-center gap-2 py-1.5 border-b border-pi-border/20 last:border-0">
-                    <span className="text-sm">{{ football:"⚽", basketball:"🏀", tennis:"🎾" }[l.sport as string] ?? "🏆"}</span>
+                    <span className="text-sm">{SPORT_ICONS[l.sport as string] ?? "🏆"}</span>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
                         <span className="text-xs font-medium text-pi-primary capitalize">{l.sport}</span>
@@ -832,15 +979,18 @@ export default function AnalyticsPage() {
         />
         <div className="grid md:grid-cols-2 gap-2">
           {[
-            { label: "Live scores update",         freq: "Every 60 seconds",       dot: "bg-pi-emerald",      note: "ESPN, no quota" },
-            { label: "Intelligence signals",        freq: "Every 30 minutes",       dot: "bg-pi-amber",        note: "Gemini NLP extraction" },
-            { label: "Pre-match lineups",           freq: "Every 1 hour",           dot: "bg-pi-sky",          note: "API-Football, PLAY picks only" },
-            { label: "ML predictions",              freq: "Every 3 hours",          dot: "bg-pi-indigo-light", note: "All upcoming matches" },
-            { label: "News + articles",             freq: "Every 3 hours",          dot: "bg-pi-sky",          note: "Gemini rewrite" },
+            { label: "Live scores (all sports)",    freq: "60s live / 5 min idle",  dot: "bg-pi-emerald",      note: "Sofascore primary · ESPN fallback · adaptive rate" },
+            { label: "Clubs standings + fixtures",  freq: "Every 5 minutes",        dot: "bg-pi-emerald",      note: "All leagues · DB-only reads for users" },
+            { label: "Clubs news + top scorers",    freq: "Every 30 minutes",       dot: "bg-pi-sky",          note: "ESPN · all supported leagues" },
+            { label: "Intelligence signals",        freq: "Every 30 minutes",       dot: "bg-pi-amber",        note: "Gemini NLP extraction from news" },
+            { label: "Pre-match lineups",           freq: "Every 1 hour",           dot: "bg-pi-sky",          note: "API-Football · PLAY picks only" },
+            { label: "ML predictions",              freq: "Every 3 hours",          dot: "bg-pi-indigo-light", note: "All upcoming matches · all sports" },
+            { label: "News + articles",             freq: "Every 3 hours",          dot: "bg-pi-sky",          note: "Gemini rewrite pipeline" },
             { label: "Odds refresh",                freq: "Every 6 hours",          dot: "bg-pi-sky",          note: "Sportybet + Odds API" },
             { label: "Match result resolution",     freq: "Every 2 hours",          dot: "bg-pi-amber",        note: "Updates PerformanceLog" },
+            { label: "Multi-sport data ingestion",  freq: "Daily 02:00 UTC",        dot: "bg-pi-violet",       note: "Sofascore + ESPN · all 10 sports · feeds ML training" },
             { label: "Daily picks + email",         freq: "Daily 08:00 UTC",        dot: "bg-pi-violet",       note: "Decision engine run" },
-            { label: "Model retraining",            freq: "Weekly Sunday 03:00 UTC", dot: "bg-pi-indigo-light", note: "Full retrain on all data" },
+            { label: "Model retraining (all sports)",freq: "Weekly Sunday 03:00 UTC",dot: "bg-pi-indigo-light", note: "Full retrain after daily ingest completes" },
           ].map(({ label, freq, dot, note }) => (
             <div key={label} className="flex items-start gap-3 py-2.5 border-b last:border-0" style={{ borderColor: "rgba(99,120,180,0.15)" }}>
               <span className={`w-2.5 h-2.5 rounded-full mt-1 shrink-0 ${dot}`} />

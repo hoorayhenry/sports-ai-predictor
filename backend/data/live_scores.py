@@ -1,12 +1,15 @@
 """
-Live scores integration — ESPN as primary source.
+Live scores — Sofascore as primary (all sports, ~20-30s delay).
+ESPN as fallback per sport (~60-90s delay, no auth).
+API-Football as last resort (100 req/day free tier).
 
-Sources (in priority order):
-  1. ESPN public scoreboard API  — no auth, no quota, exact live minute
-  2. API-Football                — fallback only (100 req/day shared cap)
+Architecture:
+  1. Sofascore fetches ALL sports in one parallel sweep — football, basketball,
+     tennis, baseball, NFL, NHL, cricket, rugby, handball, volleyball.
+  2. If Sofascore returns nothing (rare outage), ESPN covers all football leagues.
+  3. If ESPN also fails, API-Football covers live football as a last resort.
 
-ESPN covers all major leagues simultaneously with no authentication.
-Data refreshes every ~30s on their side; we poll every 60s.
+The adaptive scheduler runs this every 60s during live matches, 5 min otherwise.
 """
 from __future__ import annotations
 import httpx
@@ -14,240 +17,355 @@ import concurrent.futures
 from datetime import datetime, date, timedelta
 from loguru import logger
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ── Sofascore constants ───────────────────────────────────────────────────────
 
-_ESPN_BASE     = "https://site.api.espn.com/apis/site/v2/sports/soccer"
-_ESPN_HEADERS  = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+_SS_BASE = "https://api.sofascore.com/api/v1"
+_SS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.sofascore.com/",
+}
+
+# (sofascore_slug, internal_sport_key)
+SOFASCORE_SPORTS = [
+    ("football",          "football"),
+    ("basketball",        "basketball"),
+    ("tennis",            "tennis"),
+    ("baseball",          "baseball"),
+    ("american-football", "american_football"),
+    ("ice-hockey",        "ice_hockey"),
+    ("cricket",           "cricket"),
+    ("rugby",             "rugby"),
+    ("handball",          "handball"),
+    ("volleyball",        "volleyball"),
+]
+
+# ── ESPN constants ────────────────────────────────────────────────────────────
+
+_ESPN_BASE    = "https://site.api.espn.com/apis/site/v2/sports"
+_ESPN_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
     "Accept": "application/json",
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# All leagues ESPN covers — (slug, display_name, country)
-ESPN_LEAGUES = [
-    ("eng.1",                  "Premier League",           "England"),
-    ("eng.2",                  "Championship",             "England"),
-    ("eng.3",                  "League One",               "England"),
-    ("eng.4",                  "League Two",               "England"),
-    ("esp.1",                  "La Liga",                  "Spain"),
-    ("ger.1",                  "Bundesliga",               "Germany"),
-    ("ita.1",                  "Serie A",                  "Italy"),
-    ("ita.2",                  "Serie B",                  "Italy"),
-    ("fra.1",                  "Ligue 1",                  "France"),
-    ("por.1",                  "Primeira Liga",            "Portugal"),
-    ("ned.1",                  "Eredivisie",               "Netherlands"),
-    ("tur.1",                  "Süper Lig",                "Turkey"),
-    ("sco.1",                  "Scottish Premiership",     "Scotland"),
-    ("bel.1",                  "First Division A",         "Belgium"),
-    ("usa.1",                  "MLS",                      "USA"),
-    ("mex.1",                  "Liga MX",                  "Mexico"),
-    ("bra.1",                  "Brasileirão",              "Brazil"),
-    ("arg.1",                  "Liga Profesional",         "Argentina"),
-    ("col.1",                  "Liga BetPlay",             "Colombia"),
-    ("chi.1",                  "Primera División",         "Chile"),
-    ("ecu.1",                  "LigaPro",                  "Ecuador"),
-    ("per.1",                  "Liga 1",                   "Peru"),
-    ("uru.1",                  "Primera División",         "Uruguay"),
-    ("par.1",                  "Primera División",         "Paraguay"),
-    ("bol.1",                  "División Profesional",     "Bolivia"),
-    ("ven.1",                  "Primera División",         "Venezuela"),
-    ("sau.1",                  "Saudi Pro League",         "Saudi Arabia"),
-    ("jpn.1",                  "J1 League",                "Japan"),
-    ("chn.1",                  "Chinese Super League",     "China"),
-    ("uefa.champions",         "Champions League",         "Europe"),
-    ("uefa.europa",            "Europa League",            "Europe"),
-    ("uefa.europa.conf",       "Conference League",        "Europe"),
-    ("conmebol.libertadores",  "Copa Libertadores",        "South America"),
-    ("conmebol.sudamericana",  "Copa Sudamericana",        "South America"),
-    ("concacaf.champions",     "CONCACAF Champions Cup",   "CONCACAF"),
+# ESPN leagues for football fallback — (espn_path, display_name, country)
+ESPN_FOOTBALL_LEAGUES = [
+    ("soccer/eng.1",            "Premier League",          "England"),
+    ("soccer/eng.2",            "Championship",            "England"),
+    ("soccer/esp.1",            "La Liga",                 "Spain"),
+    ("soccer/ger.1",            "Bundesliga",              "Germany"),
+    ("soccer/ita.1",            "Serie A",                 "Italy"),
+    ("soccer/fra.1",            "Ligue 1",                 "France"),
+    ("soccer/por.1",            "Primeira Liga",           "Portugal"),
+    ("soccer/ned.1",            "Eredivisie",              "Netherlands"),
+    ("soccer/tur.1",            "Süper Lig",               "Turkey"),
+    ("soccer/sco.1",            "Scottish Premiership",    "Scotland"),
+    ("soccer/bel.1",            "First Division A",        "Belgium"),
+    ("soccer/usa.1",            "MLS",                     "USA"),
+    ("soccer/mex.1",            "Liga MX",                 "Mexico"),
+    ("soccer/bra.1",            "Brasileirão",             "Brazil"),
+    ("soccer/arg.1",            "Liga Profesional",        "Argentina"),
+    ("soccer/col.1",            "Liga BetPlay",            "Colombia"),
+    ("soccer/sau.1",            "Saudi Pro League",        "Saudi Arabia"),
+    ("soccer/jpn.1",            "J1 League",               "Japan"),
+    ("soccer/uefa.champions",   "Champions League",        "Europe"),
+    ("soccer/uefa.europa",      "Europa League",           "Europe"),
+    ("soccer/uefa.europa.conf", "Conference League",       "Europe"),
+    ("soccer/conmebol.libertadores", "Copa Libertadores",  "South America"),
 ]
 
-_API_BASE     = "https://v3.football.api-sports.io"
+# ESPN paths for non-football sports fallback
+ESPN_OTHER_LEAGUES = [
+    ("basketball/nba",       "NBA",        "basketball", "USA"),
+    ("basketball/mens-college-basketball", "NCAA Basketball", "basketball", "USA"),
+    ("basketball/wnba",      "WNBA",       "basketball", "USA"),
+    ("basketball/nbl",       "NBL",        "basketball", "Australia"),
+    ("baseball/mlb",         "MLB",        "baseball",   "USA"),
+    ("football/nfl",         "NFL",        "american_football", "USA"),
+    ("football/college-football", "NCAA Football", "american_football", "USA"),
+    ("hockey/nhl",           "NHL",        "ice_hockey", "USA"),
+]
+
+# ── API-Football constants ────────────────────────────────────────────────────
+
+_API_BASE      = "https://v3.football.api-sports.io"
 _RAPIDAPI_BASE = "https://api-football-v1.p.rapidapi.com/v3"
 
 
-# ── ESPN fetcher (PRIMARY — no auth, no quota) ────────────────────────────────
+# ── Sofascore parsers ─────────────────────────────────────────────────────────
 
-def _fetch_espn_league(slug: str, country: str, timeout: int = 8) -> list[dict]:
+def _parse_sofascore_event(e: dict, sport_key: str) -> dict:
+    """Parse a Sofascore event into internal fixture format."""
+    tournament = e.get("tournament", {})
+    home       = e.get("homeTeam", {})
+    away       = e.get("awayTeam", {})
+    hs         = e.get("homeScore", {})
+    as_        = e.get("awayScore", {})
+    status     = e.get("status", {})
+    time_data  = e.get("time", {})
+
+    status_type = status.get("type", "")
+    if status_type == "inprogress":
+        status_str = "live"
+    elif status_type in ("finished", "ended"):
+        status_str = "finished"
+    else:
+        status_str = "scheduled"
+
+    # Live minute: football uses played time; other sports use period/description
+    live_min   = None
+    clock_str  = status.get("description", "")
+    if sport_key == "football" and status_str == "live":
+        played = time_data.get("played")
+        if played is not None:
+            live_min  = int(played)
+            clock_str = f"{live_min}'"
+        if status.get("description", "").lower() in ("halftime", "ht"):
+            live_min  = 45
+            clock_str = "HT"
+
+    home_score_raw = hs.get("current")
+    away_score_raw = as_.get("current")
+
+    # Sport-specific period scores
+    extra: dict = {}
+    if sport_key == "basketball":
+        extra["period"]       = e.get("roundInfo", {}).get("round")
+        extra["home_periods"] = [hs.get(f"period{i}") for i in range(1, 5) if hs.get(f"period{i}") is not None]
+        extra["away_periods"] = [as_.get(f"period{i}") for i in range(1, 5) if as_.get(f"period{i}") is not None]
+    elif sport_key == "tennis":
+        extra["home_sets"] = [hs.get(f"period{i}") for i in range(1, 6) if hs.get(f"period{i}") is not None]
+        extra["away_sets"] = [as_.get(f"period{i}") for i in range(1, 6) if as_.get(f"period{i}") is not None]
+        clock_str = status.get("description", "")
+    elif sport_key == "ice_hockey":
+        extra["period"] = time_data.get("currentPeriod")
+
+    return {
+        "fixture_id":  e.get("id"),
+        "external_id": f"ss_{e.get('id', '')}",
+        "home_team":   home.get("name") or home.get("shortName", ""),
+        "away_team":   away.get("name") or away.get("shortName", ""),
+        "home_score":  int(home_score_raw) if home_score_raw is not None else None,
+        "away_score":  int(away_score_raw) if away_score_raw is not None else None,
+        "status":      status_str,
+        "live_minute": live_min,
+        "clock_str":   clock_str,
+        "league_name": tournament.get("name", ""),
+        "country":     (tournament.get("category") or {}).get("name", ""),
+        "match_date":  e.get("startTimestamp", ""),
+        "sport_key":   sport_key,
+        "source":      "sofascore",
+        "extra":       extra,
+    }
+
+
+def _fetch_sofascore_sport(ss_slug: str, sport_key: str, timeout: int = 10) -> list[dict]:
+    """Fetch all live events for one sport from Sofascore."""
+    try:
+        resp = httpx.get(
+            f"{_SS_BASE}/sport/{ss_slug}/events/live",
+            headers=_SS_HEADERS,
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            return []
+        events = resp.json().get("events", [])
+        return [_parse_sofascore_event(e, sport_key) for e in events]
+    except Exception:
+        return []
+
+
+def fetch_live_fixtures_sofascore() -> list[dict]:
+    """
+    Fetch ALL live matches across ALL supported sports from Sofascore in parallel.
+    Returns a flat list of internal fixture dicts.
+    """
+    all_live: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(SOFASCORE_SPORTS)) as pool:
+        futures = {
+            pool.submit(_fetch_sofascore_sport, ss_slug, sport_key): ss_slug
+            for ss_slug, sport_key in SOFASCORE_SPORTS
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                results = fut.result()
+                all_live.extend(results)
+            except Exception:
+                pass
+    logger.info(f"Sofascore: {len(all_live)} live matches across all sports")
+    return all_live
+
+
+# ── ESPN parsers (football fallback) ─────────────────────────────────────────
+
+def _parse_espn_event(e: dict, country: str, sport_key: str = "football") -> dict:
+    """Parse a single ESPN scoreboard event into internal format."""
+    comp        = e.get("competitions", [{}])[0]
+    competitors = comp.get("competitors", [])
+    status      = e.get("status", {})
+    stype       = status.get("type", {})
+
+    home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0] if competitors else {})
+    away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1] if len(competitors) > 1 else {})
+
+    clock_str = status.get("displayClock", "")
+    live_min  = None
+    try:
+        live_min = int(clock_str.replace("'", "").strip().split("+")[0])
+    except (ValueError, IndexError):
+        pass
+
+    desc = stype.get("name", "")
+    if desc == "STATUS_HALFTIME":
+        status_str = "live"
+        live_min   = 45
+        clock_str  = "HT"
+    elif stype.get("state") == "in":
+        status_str = "live"
+    elif stype.get("completed"):
+        status_str = "finished"
+    else:
+        status_str = "scheduled"
+
+    def _score(c: dict):
+        raw = c.get("score", "")
+        try:
+            return int(raw) if raw not in (None, "", "--") else None
+        except (ValueError, TypeError):
+            return None
+
+    return {
+        "fixture_id":  e.get("id"),
+        "external_id": f"espn_{e.get('id', '')}",
+        "home_team":   (home.get("team") or {}).get("displayName") or "",
+        "away_team":   (away.get("team") or {}).get("displayName") or "",
+        "home_score":  _score(home),
+        "away_score":  _score(away),
+        "status":      status_str,
+        "live_minute": live_min,
+        "clock_str":   clock_str,
+        "league_name": e.get("season", {}).get("slug", ""),
+        "country":     country,
+        "match_date":  comp.get("date", "") or e.get("date", ""),
+        "sport_key":   sport_key,
+        "source":      "espn",
+        "extra":       {},
+    }
+
+
+def _fetch_espn_league(espn_path: str, country: str, sport_key: str = "football", timeout: int = 8) -> list[dict]:
     """Fetch scoreboard for one ESPN league. Returns live fixtures only."""
     try:
         resp = httpx.get(
-            f"{_ESPN_BASE}/{slug}/scoreboard",
+            f"{_ESPN_BASE}/{espn_path}/scoreboard",
             headers=_ESPN_HEADERS,
             timeout=timeout,
         )
         if resp.status_code != 200:
             return []
-        data = resp.json()
-        events = data.get("events", [])
-        results = []
+        events = resp.json().get("events", [])
+        live   = []
         for e in events:
             stype = e.get("status", {}).get("type", {})
             state = stype.get("state", "")
             name  = stype.get("name", "")
-            # Include in-progress and halftime; exclude pre-match and final
-            if state == "in" or name in ("STATUS_HALFTIME", "STATUS_IN_PROGRESS",
-                                          "STATUS_SECOND_HALF", "STATUS_FIRST_HALF",
-                                          "STATUS_OVERTIME", "STATUS_EXTRA_TIME",
-                                          "STATUS_PENALTY"):
-                results.append(_parse_espn_event(e, country))
-        return results
+            if state == "in" or name in (
+                "STATUS_HALFTIME", "STATUS_IN_PROGRESS",
+                "STATUS_SECOND_HALF", "STATUS_FIRST_HALF",
+                "STATUS_OVERTIME", "STATUS_EXTRA_TIME", "STATUS_PENALTY",
+            ):
+                live.append(_parse_espn_event(e, country, sport_key))
+        return live
     except Exception:
         return []
 
 
-def _parse_espn_event(e: dict, country: str) -> dict:
-    """Parse a single ESPN event into our internal format."""
-    comp       = e.get("competitions", [{}])[0]
-    competitors = comp.get("competitors", [])
-    status     = e.get("status", {})
-    stype      = status.get("type", {})
-
-    home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0] if competitors else {})
-    away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1] if len(competitors) > 1 else {})
-
-    # Parse live minute from displayClock (e.g. "58'" → 58)
-    clock_str  = status.get("displayClock", "")
-    live_min   = None
-    try:
-        live_min = int(clock_str.replace("'", "").replace("+", "").strip().split("+")[0])
-    except (ValueError, IndexError):
-        pass
-
-    # Status mapping
-    desc = stype.get("name", "")
-    if desc in ("STATUS_HALFTIME",):
-        status_str  = "live"
-        live_min    = 45
-        clock_str   = "HT"
-    elif stype.get("state") == "in":
-        status_str  = "live"
-    elif stype.get("completed"):
-        status_str  = "finished"
-    else:
-        status_str  = "scheduled"
-
-    home_score_raw = home.get("score", "")
-    away_score_raw = away.get("score", "")
-    try:
-        home_score = int(home_score_raw) if home_score_raw not in (None, "", "--") else None
-        away_score = int(away_score_raw) if away_score_raw not in (None, "", "--") else None
-    except (ValueError, TypeError):
-        home_score = away_score = None
-
-    home_name  = home.get("team", {}).get("displayName") or home.get("team", {}).get("shortDisplayName", "")
-    away_name  = away.get("team", {}).get("displayName") or away.get("team", {}).get("shortDisplayName", "")
-    league_name = e.get("season", {}).get("slug", "") or ""
-
-    # Use ESPN event ID as external_id with prefix so it doesn't clash
-    ext_id = f"espn_{e.get('id', '')}"
-
-    return {
-        "fixture_id":  e.get("id"),
-        "external_id": ext_id,
-        "home_team":   home_name,
-        "away_team":   away_name,
-        "home_score":  home_score,
-        "away_score":  away_score,
-        "status":      status_str,
-        "live_minute": live_min,
-        "clock_str":   clock_str,
-        "league_name": league_name,
-        "country":     country,
-        "match_date":  comp.get("date", "") or e.get("date", ""),
-        "api_status":  stype.get("name", ""),
-    }
-
-
 def fetch_live_fixtures_espn() -> list[dict]:
     """
-    Fetch ALL live matches across all supported leagues in parallel.
-    No authentication. No daily quota. Returns internal fixture dicts.
+    Fetch live football matches from all ESPN leagues (Sofascore fallback).
+    Also fetches NBA, MLB, NFL, NHL as secondary sport coverage.
     """
     live: list[dict] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+
+    # Football leagues
+    football_tasks = [
+        (path, country, "football")
+        for path, _name, country in ESPN_FOOTBALL_LEAGUES
+    ]
+    # Other sports
+    other_tasks = [
+        (path, country, sport_key)
+        for path, _name, sport_key, country in ESPN_OTHER_LEAGUES
+    ]
+    all_tasks = football_tasks + other_tasks
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
         futures = {
-            pool.submit(_fetch_espn_league, slug, country): slug
-            for slug, _, country in ESPN_LEAGUES
+            pool.submit(_fetch_espn_league, path, country, sport_key): path
+            for path, country, sport_key in all_tasks
         }
         for fut in concurrent.futures.as_completed(futures):
             try:
                 live.extend(fut.result())
             except Exception:
                 pass
-    logger.info(f"ESPN live scores: {len(live)} live matches across all leagues")
+
+    logger.info(f"ESPN fallback: {len(live)} live matches")
     return live
 
 
-# ── API-Football (FALLBACK only) ───────────────────────────────────────────────
+# ── API-Football fallback ─────────────────────────────────────────────────────
 
-def _headers(api_key: str) -> dict:
+def _af_headers(api_key: str) -> dict:
     if len(api_key) > 40:
         return {"X-RapidAPI-Key": api_key, "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com"}
     return {"x-apisports-key": api_key}
 
 
-def _base(api_key: str) -> str:
+def _af_base(api_key: str) -> str:
     return _RAPIDAPI_BASE if len(api_key) > 40 else _API_BASE
 
 
-def fetch_live_fixtures(api_key: str) -> list[dict]:
-    """API-Football fallback — only called when ESPN returns nothing."""
+def fetch_live_fixtures_api_football(api_key: str) -> list[dict]:
+    """API-Football last-resort fallback — football only, 100 req/day free tier."""
     if not api_key:
         return []
     try:
         resp = httpx.get(
-            f"{_base(api_key)}/fixtures",
+            f"{_af_base(api_key)}/fixtures",
             params={"live": "all"},
-            headers=_headers(api_key),
+            headers=_af_headers(api_key),
             timeout=15,
         )
         resp.raise_for_status()
-        data = resp.json()
+        data   = resp.json()
         errors = data.get("errors", {})
         if errors:
-            logger.warning(f"API-Football error: {errors}")
             return []
-        fixtures = data.get("response", [])
-        logger.info(f"API-Football fallback: {len(fixtures)} live fixtures")
-        return [_parse_fixture(f) for f in fixtures]
+        return [_parse_af_fixture(f) for f in data.get("response", [])]
     except Exception as e:
         logger.warning(f"API-Football live fetch failed: {e}")
         return []
 
 
-def fetch_todays_fixtures(api_key: str) -> list[dict]:
-    """Fetch all fixtures for today from API-Football."""
-    if not api_key:
-        return []
-    today = date.today().strftime("%Y-%m-%d")
-    try:
-        resp = httpx.get(
-            f"{_base(api_key)}/fixtures",
-            params={"date": today},
-            headers=_headers(api_key),
-            timeout=20,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("errors"):
-            return []
-        fixtures = data.get("response", [])
-        logger.info(f"Today's fixtures: {len(fixtures)} for {today}")
-        return [_parse_fixture(f) for f in fixtures]
-    except Exception as e:
-        logger.warning(f"Today's fixtures fetch failed: {e}")
-        return []
-
-
-def _parse_fixture(f: dict) -> dict:
-    """Parse API-Football fixture into internal format."""
-    fixture  = f.get("fixture", {})
-    teams    = f.get("teams", {})
-    goals    = f.get("goals", {})
-    league   = f.get("league", {})
-    elapsed  = fixture.get("status", {}).get("elapsed")
+def _parse_af_fixture(f: dict) -> dict:
+    fixture    = f.get("fixture", {})
+    teams      = f.get("teams", {})
+    goals      = f.get("goals", {})
+    league     = f.get("league", {})
+    elapsed    = fixture.get("status", {}).get("elapsed")
     api_status = fixture.get("status", {}).get("short", "NS")
+    live_stats = {"1H", "2H", "HT", "ET", "P", "BT", "LIVE", "INT"}
+    fin_stats  = {"FT", "AET", "PEN"}
+    status_str = "live" if api_status in live_stats else ("finished" if api_status in fin_stats else "scheduled")
     return {
         "fixture_id":  fixture.get("id"),
         "external_id": str(fixture.get("id", "")),
@@ -255,37 +373,28 @@ def _parse_fixture(f: dict) -> dict:
         "away_team":   teams.get("away", {}).get("name", ""),
         "home_score":  goals.get("home"),
         "away_score":  goals.get("away"),
-        "status":      _map_status(api_status),
+        "status":      status_str,
         "live_minute": elapsed,
         "clock_str":   f"{elapsed}'" if elapsed else api_status,
         "league_name": league.get("name", ""),
         "country":     league.get("country", ""),
         "match_date":  fixture.get("date", ""),
-        "api_status":  api_status,
+        "sport_key":   "football",
+        "source":      "api_football",
+        "extra":       {},
     }
 
 
-def _map_status(api_status: str) -> str:
-    live_statuses     = {"1H", "2H", "HT", "ET", "P", "BT", "LIVE", "INT"}
-    finished_statuses = {"FT", "AET", "PEN"}
-    if api_status in live_statuses:
-        return "live"
-    if api_status in finished_statuses:
-        return "finished"
-    return "scheduled"
-
-
-# ── Main update function ───────────────────────────────────────────────────────
+# ── Stale match cleanup ───────────────────────────────────────────────────────
 
 def _expire_stale_live_matches(db, active_external_ids: set) -> int:
     """
-    Any DB match that is still marked 'live' but is NOT in the current
-    ESPN live feed AND started more than 3 hours ago is almost certainly
-    finished. Reset it to 'finished' so the live page stays accurate.
+    Reset any DB match still marked 'live' that's not in the current feed
+    AND started more than 3 hours ago — it's almost certainly finished.
     """
     from data.db_models.models import Match
     cutoff = datetime.utcnow() - timedelta(hours=3)
-    stale = db.query(Match).filter(
+    stale  = db.query(Match).filter(
         Match.status == "live",
         Match.match_date <= cutoff,
     ).all()
@@ -307,25 +416,31 @@ def _expire_stale_live_matches(db, active_external_ids: set) -> int:
     return expired
 
 
+# ── Main update function ───────────────────────────────────────────────────────
+
 def update_live_scores(db, api_key: str = "") -> int:
     """
-    Fetch live fixtures from ESPN (primary) and update match scores in DB.
-    Falls back to API-Football only if ESPN returns nothing.
-    Always expires stale 'live' rows regardless of whether ESPN has data.
-    Returns number of matches updated.
+    Fetch live matches from Sofascore (primary, all sports) → ESPN (fallback, multi-sport)
+    → API-Football (last resort, football only).
+    Updates match scores in DB. Returns number of matches updated.
     """
     from data.db_models.models import Match, Participant
     from sqlalchemy import func
 
-    # Primary: ESPN — no auth, no quota
-    fixtures = fetch_live_fixtures_espn()
+    # ── 1. Sofascore — all sports, ~20-30s delay ──────────────────────
+    fixtures = fetch_live_fixtures_sofascore()
 
-    # Fallback: API-Football (only if ESPN has nothing AND we have a key)
+    # ── 2. ESPN fallback — if Sofascore completely empty (rare outage) ─
+    if not fixtures:
+        logger.info("Sofascore returned nothing — falling back to ESPN")
+        fixtures = fetch_live_fixtures_espn()
+
+    # ── 3. API-Football last resort — football only ────────────────────
     if not fixtures and api_key:
-        logger.info("ESPN returned no live matches — trying API-Football fallback")
-        fixtures = fetch_live_fixtures(api_key)
+        logger.info("ESPN also empty — last resort: API-Football")
+        fixtures = fetch_live_fixtures_api_football(api_key)
 
-    # Always clean up stale live rows — even if ESPN returned 0 right now
+    # Always clean stale 'live' rows even if no live data right now
     active_ids = {f.get("external_id", "") for f in fixtures}
     _expire_stale_live_matches(db, active_ids)
 
@@ -337,23 +452,23 @@ def update_live_scores(db, api_key: str = "") -> int:
     for fix in fixtures:
         m = None
 
-        # Match by external_id
+        # Try exact external_id match first
         if fix.get("external_id"):
             m = db.query(Match).filter(Match.external_id == fix["external_id"]).first()
 
-        # Fallback: fuzzy match by team name + today's date
-        if not m and fix["home_team"] and fix["away_team"]:
-            home = db.query(Participant).filter(
+        # Fuzzy match: team names + today
+        if not m and fix.get("home_team") and fix.get("away_team"):
+            home_p = db.query(Participant).filter(
                 func.lower(Participant.name).like(f"%{fix['home_team'].lower()[:12]}%")
             ).first()
-            away = db.query(Participant).filter(
+            away_p = db.query(Participant).filter(
                 func.lower(Participant.name).like(f"%{fix['away_team'].lower()[:12]}%")
             ).first()
-            if home and away:
+            if home_p and away_p:
                 today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
                 m = db.query(Match).filter(
-                    Match.home_id == home.id,
-                    Match.away_id == away.id,
+                    Match.home_id   == home_p.id,
+                    Match.away_id   == away_p.id,
                     Match.match_date >= today_start,
                 ).first()
 
@@ -372,14 +487,20 @@ def update_live_scores(db, api_key: str = "") -> int:
             m.status = fix["status"]
             changed = True
 
-        # Store live_minute in extra_data
-        if fix.get("live_minute") is not None:
+        # Store live metadata in extra_data
+        if fix.get("live_minute") is not None or fix.get("extra"):
             import json
             try:
                 extra = json.loads(m.extra_data or "{}")
             except Exception:
                 extra = {}
-            extra["live_minute"] = fix["live_minute"]
+            if fix.get("live_minute") is not None:
+                extra["live_minute"] = fix["live_minute"]
+            if fix.get("clock_str"):
+                extra["clock"] = fix["clock_str"]
+            if fix.get("source"):
+                extra["live_source"] = fix["source"]
+            extra.update(fix.get("extra") or {})
             m.extra_data = json.dumps(extra)
             changed = True
 
@@ -390,7 +511,6 @@ def update_live_scores(db, api_key: str = "") -> int:
     if updated:
         try:
             db.commit()
-            logger.info(f"Live scores: updated {updated} matches in DB")
         except Exception as e:
             db.rollback()
             logger.warning(f"Live scores commit failed: {e}")
@@ -398,11 +518,54 @@ def update_live_scores(db, api_key: str = "") -> int:
     return updated
 
 
+# ── Sofascore: scheduled events for any date (data ingestion) ─────────────────
+
+def fetch_sofascore_events_for_date(ss_slug: str, sport_key: str, event_date: date) -> list[dict]:
+    """
+    Fetch all scheduled (including finished) events for a specific date.
+    Used by the historical data ingestion job to populate the matches table.
+    """
+    try:
+        date_str = event_date.strftime("%Y-%m-%d")
+        resp = httpx.get(
+            f"{_SS_BASE}/sport/{ss_slug}/scheduled-events/{date_str}",
+            headers=_SS_HEADERS,
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return []
+        events = resp.json().get("events", [])
+        return [_parse_sofascore_event(e, sport_key) for e in events]
+    except Exception:
+        return []
+
+
+# ── Today's results (for resolve job) ────────────────────────────────────────
+
+def fetch_todays_fixtures(api_key: str) -> list[dict]:
+    """Fetch all fixtures for today from API-Football (resolve job)."""
+    if not api_key:
+        return []
+    today = date.today().strftime("%Y-%m-%d")
+    try:
+        resp = httpx.get(
+            f"{_af_base(api_key)}/fixtures",
+            params={"date": today},
+            headers=_af_headers(api_key),
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("errors"):
+            return []
+        return [_parse_af_fixture(f) for f in data.get("response", [])]
+    except Exception as e:
+        logger.warning(f"Today's fixtures fetch failed: {e}")
+        return []
+
+
 def sync_todays_results(db, api_key: str) -> int:
-    """
-    Fetch today's completed fixtures from API-Football and update results.
-    Used alongside resolve_finished_matches job.
-    """
+    """Fetch today's completed fixtures and update results in DB."""
     from data.db_models.models import Match
 
     fixtures = fetch_todays_fixtures(api_key)
@@ -418,7 +581,7 @@ def sync_todays_results(db, api_key: str) -> int:
         m.home_score = fix["home_score"]
         m.away_score = fix["away_score"]
         m.status     = "finished"
-        hs = fix["home_score"] or 0
+        hs  = fix["home_score"] or 0
         as_ = fix["away_score"] or 0
         m.result     = "H" if hs > as_ else ("A" if hs < as_ else "D")
         m.updated_at = datetime.utcnow()
@@ -427,7 +590,6 @@ def sync_todays_results(db, api_key: str) -> int:
     if updated:
         try:
             db.commit()
-            logger.info(f"Today's results: {updated} matches resolved")
         except Exception as e:
             db.rollback()
             logger.warning(f"Results sync commit failed: {e}")

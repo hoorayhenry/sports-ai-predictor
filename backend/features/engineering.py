@@ -38,6 +38,9 @@ COMMON_FEATURES = [
     "home_league_gd_per_game", "away_league_gd_per_game",
     "home_form_points", "away_form_points",
     "pts_rate_diff", "form_points_diff",
+    # ── Historical season finish (from league_season_cache) ───────────
+    # 1.0 = champion last season, 0.5 = midtable, 0.0 = bottom
+    "home_prev_season_rank", "away_prev_season_rank",
     # ── Shot-based features (xG proxy) ───────────────────────────────
     "home_shots_avg_5", "away_shots_avg_5",
     "home_sot_avg_5", "away_sot_avg_5",
@@ -50,6 +53,40 @@ COMMON_FEATURES = [
     "dc_over_2_5", "dc_btts_yes",
     "dc_exp_home_goals", "dc_exp_away_goals",
 ]
+
+# Mapping: competition name → ESPN league slug (for historical standings lookup)
+_COMP_NAME_TO_SLUG: dict[str, str] = {
+    "premier league":                    "eng.1",
+    "la liga":                           "esp.1",
+    "bundesliga":                        "ger.1",
+    "serie a":                           "ita.1",
+    "ligue 1":                           "fra.1",
+    "primeira liga":                     "por.1",
+    "eredivisie":                        "ned.1",
+    "süper lig":                         "tur.1",
+    "super lig":                         "tur.1",
+    "scottish premiership":              "sco.1",
+    "pro league":                        "bel.1",
+    "mls":                               "usa.1",
+    "brasileirão":                       "bra.1",
+    "serie a brasileira":                "bra.1",
+    "liga profesional":                  "arg.1",
+    "champions league":                  "uefa.champions",
+    "uefa champions league":             "uefa.champions",
+    "europa league":                     "uefa.europa",
+    "uefa europa league":                "uefa.europa",
+    "conference league":                 "uefa.europa.conf",
+    "uefa europa conference league":     "uefa.europa.conf",
+}
+
+# Mapping: API-Football league ID string → ESPN league slug
+_AF_ID_TO_SLUG: dict[str, str] = {
+    "39": "eng.1",   "140": "esp.1",  "78": "ger.1",   "135": "ita.1",
+    "61": "fra.1",   "94":  "por.1",  "88": "ned.1",   "203": "tur.1",
+    "179": "sco.1",  "144": "bel.1",  "253": "usa.1",  "71":  "bra.1",
+    "128": "arg.1",  "239": "col.1",
+    "2": "uefa.champions", "3": "uefa.europa", "848": "uefa.europa.conf",
+}
 
 # Dixon-Coles model instance — fitted once per training session, reused for inference
 _dc_model = None
@@ -321,6 +358,75 @@ def _referee_stats(df: pd.DataFrame, referee: str | None, before: datetime) -> d
     }
 
 
+def _get_league_slug_for_comp(db: Session, competition_id: int) -> str | None:
+    """Map a Competition row to an ESPN league slug for standings lookup."""
+    from data.db_models.models import Competition
+    comp = db.query(Competition).filter_by(id=competition_id).first()
+    if not comp:
+        return None
+    # Try external_id (API-Football numeric ID stored as string)
+    slug = _AF_ID_TO_SLUG.get(str(comp.external_id or ""))
+    if slug:
+        return slug
+    # Try competition name
+    name_lower = (comp.name or "").lower()
+    for key, s in _COMP_NAME_TO_SLUG.items():
+        if key in name_lower or name_lower in key:
+            return s
+    return None
+
+
+def _prev_season_rank(db: Session, team_name: str, competition_id: int, match_date: datetime) -> float:
+    """
+    Return this team's end-of-previous-season league rank from LeagueSeasonCache.
+    Scale: 1.0 = champion last season, 0.5 = midtable / unknown, 0.0 = bottom.
+
+    European seasons span Aug–Jun: a match on 2024-10-05 belongs to season 2024,
+    so we look at season 2023 standings.  South American/MLS seasons are calendar-year
+    but the same heuristic (month >= 7 → current year's season) is close enough.
+    """
+    try:
+        import json as _json
+        from data.db_models.models import LeagueSeasonCache
+
+        league_slug = _get_league_slug_for_comp(db, competition_id)
+        if not league_slug:
+            return 0.5
+
+        # Determine which ESPN season this match falls in, then subtract 1
+        season_year = match_date.year if match_date.month >= 7 else match_date.year - 1
+        prev_season = season_year - 1
+
+        row = (
+            db.query(LeagueSeasonCache)
+            .filter_by(league_slug=league_slug, season=prev_season, data_type="standings")
+            .first()
+        )
+        if not row:
+            return 0.5
+
+        data   = _json.loads(row.json_data)
+        groups = data.get("groups", [])
+        if not groups:
+            return 0.5
+
+        # Flatten all groups and find the team by name (partial match)
+        all_entries = [e for g in groups for e in g]
+        total       = max(len(all_entries), 1)
+        team_lower  = (team_name or "").lower()
+
+        for entry in all_entries:
+            ename = (entry.get("team_name") or "").lower()
+            if ename and (ename == team_lower or team_lower in ename or ename in team_lower):
+                rank = int(entry.get("rank") or total)
+                # rank 1 → 1.0, rank total → ~0.0
+                return round(1.0 - (rank - 1) / total, 4)
+
+    except Exception:
+        pass
+    return 0.5
+
+
 def build_row(db: Session, match: Match, df: pd.DataFrame, has_draw: bool = True) -> dict:
     hid, aid = match.home_id, match.away_id
     date = match.match_date
@@ -347,9 +453,13 @@ def build_row(db: Session, match: Match, df: pd.DataFrame, has_draw: bool = True
     ref_name = _parse_extra(match.extra_data).get("ref") if match.extra_data else None
     ref_s = _referee_stats(df, ref_name, date)
 
+    # Historical season rank (from league_season_cache) + DC model names
+    home_name   = match.home.name if match.home else ""
+    away_name   = match.away.name if match.away else ""
+    h_prev_rank = _prev_season_rank(db, home_name, match.competition_id, date)
+    a_prev_rank = _prev_season_rank(db, away_name, match.competition_id, date)
+
     # Dixon-Coles Poisson model features
-    home_name = match.home.name if match.home else ""
-    away_name = match.away.name if match.away else ""
     dc = get_dc_model(db, "football")
     try:
         dc_out = dc.predict(home_name, away_name)
@@ -394,6 +504,9 @@ def build_row(db: Session, match: Match, df: pd.DataFrame, has_draw: bool = True
         "away_form_points": als["form_pts"],
         "pts_rate_diff": hls["pts_rate"] - als["pts_rate"],
         "form_points_diff": hls["form_pts"] - als["form_pts"],
+        # ── Historical season rank (from league_season_cache) ─────────
+        "home_prev_season_rank": h_prev_rank,
+        "away_prev_season_rank": a_prev_rank,
         # ── Shot features ─────────────────────────────────────────────
         "home_shots_avg_5": hsf["shots"],
         "away_shots_avg_5": asf["shots"],

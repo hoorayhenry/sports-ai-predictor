@@ -93,7 +93,11 @@ def _auto_train():
     from features.engineering import build_training_matrix
     from data.database import get_sync_session
 
-    for sport_key in ["football", "basketball", "tennis"]:
+    for sport_key in [
+        "football", "basketball", "tennis", "baseball",
+        "american_football", "ice_hockey", "cricket", "rugby",
+        "handball", "volleyball",
+    ]:
         model_path = MODEL_DIR / f"{sport_key}_model.pkl"
         if model_path.exists():
             continue

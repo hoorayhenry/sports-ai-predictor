@@ -112,8 +112,8 @@ const LEAGUES: { slug: string; name: string; flag?: string; logo?: string }[] = 
   { slug: "arg.1",            name: "Liga Profesional",  flag: "🇦🇷" },
   { slug: "col.1",            name: "Liga BetPlay",      flag: "🇨🇴" },
   { slug: "uefa.champions",   name: "Champions League",  logo: "https://a.espncdn.com/i/leaguelogos/soccer/500/2.png" },
-  { slug: "uefa.europa",      name: "Europa League",     logo: "https://a.espncdn.com/i/leaguelogos/soccer/500/3.png" },
-  { slug: "uefa.europa.conf", name: "Conference League", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500/848.png" },
+  { slug: "uefa.europa",      name: "Europa League",     logo: "https://a.espncdn.com/i/leaguelogos/soccer/500/2310.png" },
+  { slug: "uefa.europa.conf", name: "Conference League", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500/20296.png" },
 ];
 
 const CURRENT_SEASON = 2025;
@@ -283,19 +283,22 @@ export default function StandingsPage() {
   const selectedLeague = LEAGUES.find(l => l.slug === slug);
 
 
+
   // ── Queries ─────────────────────────────────────────────────────────────────
   const { data, isLoading, isError, error } = useQuery<StandingsResponse>({
     queryKey:  ["standings", slug, season],
     queryFn:   () => api.get(`/standings?slug=${slug}&season=${season}`).then(r => r.data),
     staleTime: isHistorical ? 30 * 24 * 60 * 60 * 1000 : 60_000,
-    retry: 1,
+    gcTime:    isHistorical ? 30 * 24 * 60 * 60 * 1000 : 300_000,
+    retry: 2,
+    refetchOnMount: true,
   });
 
   const { data: fixturesData, isLoading: fixturesLoading } = useQuery<FixturesResponse>({
-    queryKey:  ["league-fixtures", slug],
-    queryFn:   () => api.get(`/standings/fixtures?slug=${slug}`).then(r => r.data),
+    queryKey:  ["league-fixtures", slug, season],
+    queryFn:   () => api.get(`/standings/fixtures?slug=${slug}&season=${season}`).then(r => r.data),
     enabled:   pageTab === "matches",
-    staleTime: 120_000,
+    staleTime: isHistorical ? 30 * 24 * 60 * 60 * 1000 : 120_000,
     retry: 1,
   });
 
@@ -308,10 +311,10 @@ export default function StandingsPage() {
   });
 
   const { data: leadersData, isLoading: leadersLoading } = useQuery<{ categories: LeaderCategory[] }>({
-    queryKey:  ["league-leaders", slug],
-    queryFn:   () => api.get(`/standings/leaders?slug=${slug}`).then(r => r.data),
+    queryKey:  ["league-leaders", slug, season],
+    queryFn:   () => api.get(`/standings/leaders?slug=${slug}&season=${season}`).then(r => r.data),
     enabled:   pageTab === "players",
-    staleTime: 1_800_000,
+    staleTime: isHistorical ? 30 * 24 * 60 * 60 * 1000 : 1_800_000,
     retry: 1,
   });
 
@@ -388,7 +391,11 @@ export default function StandingsPage() {
               }`}
             >
               {logo ? (
-                <img src={logo} alt={name} className="w-4 h-4 object-contain shrink-0" />
+                <img
+                  src={logo}
+                  alt={name}
+                  className="w-5 h-5 object-contain shrink-0 brightness-125 drop-shadow-[0_0_4px_rgba(255,255,255,0.4)]"
+                />
               ) : (
                 <span className="text-sm leading-none">{flag}</span>
               )}
