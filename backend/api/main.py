@@ -17,6 +17,7 @@ from api.routes import news as news_router
 from api.routes.standings import router as standings_router
 from api.routes.teams import teams_router, players_router
 from api.routes.analytics import router as analytics_router
+from api.routes.sports_data import router as sports_data_router
 
 settings = get_settings()
 
