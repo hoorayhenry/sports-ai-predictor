@@ -3,7 +3,7 @@ import type { Sport, Competition, Match, ValueBet, MatchDecision, SmartSet, Perf
 
 const BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000/api/v1";
 
-const api = axios.create({ baseURL: BASE });
+export const api = axios.create({ baseURL: BASE });
 
 export const fetchSports = () =>
   api.get<Sport[]>("/sports").then((r) => r.data);
@@ -65,3 +65,11 @@ export const triggerDecisionsNow = (sendEmail = false) =>
 export const fetchPredictionHistory = (params?: {
   sport?: string; days?: number; decision?: string; limit?: number;
 }) => api.get<PredictionHistory[]>("/decisions/history", { params }).then((r) => r.data);
+
+export interface LiveScoresResponse {
+  live_count: number;
+  matches: Match[];
+}
+
+export const fetchLiveScores = () =>
+  api.get<LiveScoresResponse>("/matches/live/scores").then((r) => r.data);

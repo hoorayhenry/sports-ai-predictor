@@ -47,9 +47,20 @@ def win_probabilities(home_elo: float, away_elo: float, has_draw: bool = True) -
     return {"home": h_win, "away": a_win}
 
 
+def apply_seasonal_decay(elo: float, decay: float = 0.30) -> float:
+    """
+    Partially reset a team's Elo toward the mean (1500) between seasons.
+    decay=0.30 means 30% regression: a team at 1700 becomes 1640 at season start.
+
+    Why: summer transfers, managerial changes and promotions/relegations mean
+    prior-season ratings are stale. Full carryover overfits to old form.
+    """
+    return elo + decay * (DEFAULT_ELO - elo)
+
+
 def rebuild_elo(db_session, sport_key: str):
     """Rebuild ELO from scratch for a sport's finished matches."""
-    from data.db_models.models import Match, Participant, Sport, Competition
+    from data.db_models.models import Match, Participant, Sport, Competition  # noqa: F811
     from sqlalchemy.orm import joinedload
 
     sport = db_session.query(Sport).filter_by(key=sport_key).first()
@@ -75,9 +86,27 @@ def rebuild_elo(db_session, sport_key: str):
     )
 
     has_draw = (sport_key == "football")
+    current_season_year: int | None = None
+
     for m in matches:
         if not m.home or not m.away:
             continue
+
+        # Detect season boundary (July = start of new football season).
+        # When the month crosses into July, apply decay to all participants
+        # to account for summer transfers and squad changes.
+        match_year_month = (m.match_date.year, m.match_date.month)
+        season_year = m.match_date.year if m.match_date.month >= 7 else m.match_date.year - 1
+
+        if current_season_year is not None and season_year != current_season_year:
+            # New season started — decay all team Elo ratings toward 1500
+            all_teams = db_session.query(Participant).filter_by(sport_id=sport.id).all()
+            for t in all_teams:
+                t.elo_rating = apply_seasonal_decay(t.elo_rating)
+            db_session.flush()
+
+        current_season_year = season_year
+
         h_new, a_new = update_elo(
             m.home.elo_rating, m.away.elo_rating,
             m.home_score or 0, m.away_score or 0
@@ -86,4 +115,4 @@ def rebuild_elo(db_session, sport_key: str):
         m.away.elo_rating = a_new
 
     db_session.commit()
-    print(f"ELO rebuilt for {sport_key}: {len(matches)} matches")
+    print(f"ELO rebuilt for {sport_key}: {len(matches)} matches (with seasonal decay)")

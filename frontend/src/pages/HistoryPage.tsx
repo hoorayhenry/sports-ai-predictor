@@ -24,7 +24,7 @@ export default function HistoryPage() {
     queryFn:  () => fetchPredictionHistory({
       sport:    sport === "all" ? undefined : sport,
       days,
-      decision: "PLAY",   // only show picks the AI actually made
+      decision: "PLAY",
       limit:    500,
     }),
     staleTime: 60_000,
@@ -41,26 +41,23 @@ export default function HistoryPage() {
       <div className="flex items-start justify-between mb-6">
         <div>
           <div className="flex items-center gap-2 mb-1">
-            <div className="bg-purple-500/20 p-2 rounded-xl">
-              <History size={20} className="text-purple-400" />
+            <div className="bg-pi-violet/15 p-2 rounded-xl">
+              <History size={18} className="text-pi-violet" />
             </div>
-            <h2 className="text-xl font-bold text-white">Prediction History</h2>
+            <h2 className="text-xl font-bold text-pi-primary font-display">Pick History</h2>
           </div>
-          <p className="text-xs text-slate-400 ml-11">
-            Every AI pick resolved with real match outcomes
+          <p className="text-xs text-pi-secondary ml-11">
+            Every pick resolved with real match outcomes
           </p>
         </div>
 
-        {/* Days filter */}
         <div className="flex gap-1">
           {DAYS_OPTIONS.map((d) => (
             <button
               key={d}
               onClick={() => setDays(d)}
               className={`text-xs px-2 py-1 rounded-lg transition-colors ${
-                days === d
-                  ? "bg-purple-600 text-white"
-                  : "text-slate-400 hover:text-white border border-slate-700"
+                days === d ? "pill-active" : "pill-inactive"
               }`}
             >
               {d}d
@@ -73,14 +70,14 @@ export default function HistoryPage() {
       {total > 0 && (
         <div className="grid grid-cols-4 gap-2 mb-5">
           {[
-            { label: "Picks", value: total, color: "text-white" },
-            { label: "Wins",  value: wins,  color: "text-green-400" },
-            { label: "Win %", value: `${winPct}%`, color: winPct >= 55 ? "text-green-400" : winPct >= 45 ? "text-yellow-400" : "text-red-400" },
-            { label: "P&L",   value: `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}u`, color: pnl >= 0 ? "text-green-400" : "text-red-400" },
+            { label: "Picks", value: total, color: "text-pi-primary" },
+            { label: "Wins",  value: wins,  color: "text-pi-emerald" },
+            { label: "Win %", value: `${winPct}%`, color: winPct >= 55 ? "text-pi-emerald" : winPct >= 45 ? "text-pi-amber" : "text-pi-rose" },
+            { label: "P&L",   value: `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}u`, color: pnl >= 0 ? "text-pi-emerald" : "text-pi-rose" },
           ].map(({ label, value, color }) => (
             <div key={label} className="card p-3 text-center">
-              <p className={`text-lg font-bold ${color}`}>{value}</p>
-              <p className="text-[10px] text-slate-500 mt-0.5">{label}</p>
+              <p className={`text-lg font-bold tabular-nums ${color}`}>{value}</p>
+              <p className="text-[10px] text-pi-muted mt-0.5 section-label">{label}</p>
             </div>
           ))}
         </div>
@@ -93,10 +90,10 @@ export default function HistoryPage() {
       {isLoading ? (
         <div className="flex justify-center py-20"><Spinner size={40} /></div>
       ) : history.length === 0 ? (
-        <div className="text-center py-20 text-slate-500">
+        <div className="text-center py-20 text-pi-muted">
           <p className="text-5xl mb-4">📊</p>
           <p className="text-sm">No resolved predictions yet for this period.</p>
-          <p className="text-xs mt-2 text-slate-600">
+          <p className="text-xs mt-2 text-pi-muted/60">
             Results are fetched automatically every 2 hours after matches finish.
           </p>
         </div>
@@ -115,58 +112,50 @@ function HistoryRow({ item }: { item: PredictionHistory }) {
   const isPlay = item.ai_decision === "PLAY";
 
   return (
-    <div className={`card p-3 transition-all border ${
+    <div className={`card p-3 transition-all ${
       item.is_correct
-        ? "border-green-500/25 bg-green-500/5"
-        : "border-red-500/20 bg-red-500/5"
+        ? "border-pi-emerald/25"
+        : "border-pi-rose/20"
     }`}>
       <div className="flex items-center gap-3">
-        {/* Result icon */}
         <div className="shrink-0">
           {item.is_correct ? (
-            <CheckCircle2 size={22} className="text-green-400" />
+            <CheckCircle2 size={20} className="text-pi-emerald" />
           ) : isPlay ? (
-            <XCircle size={22} className="text-red-400" />
+            <XCircle size={20} className="text-pi-rose" />
           ) : (
-            <Minus size={22} className="text-slate-500" />
+            <Minus size={20} className="text-pi-muted" />
           )}
         </div>
 
-        {/* Match info */}
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1 text-[10px] text-slate-500 mb-0.5">
+          <div className="flex items-center gap-1 text-[10px] text-pi-muted mb-0.5">
             <span>{item.sport_icon}</span>
             <span className="truncate">{item.competition}</span>
             <span className="ml-auto shrink-0">{item.match_date ? formatDate(item.match_date) : "—"}</span>
           </div>
-          <p className="text-sm font-semibold truncate">
-            <span className="text-white">{item.home_team}</span>
-            <span className="text-slate-500 mx-1">vs</span>
-            <span className="text-white">{item.away_team}</span>
+          <p className="text-sm font-semibold truncate font-display">
+            <span className="text-pi-primary">{item.home_team}</span>
+            <span className="text-pi-muted mx-1">vs</span>
+            <span className="text-pi-primary">{item.away_team}</span>
           </p>
         </div>
 
-        {/* Right column */}
         <div className="flex flex-col items-end gap-0.5 shrink-0 text-right">
-          {/* Predicted → Actual */}
           <div className="text-[11px]">
-            <span className="text-slate-400">Pick: </span>
-            <span className="text-sky-300 font-semibold">{item.predicted_outcome_label}</span>
+            <span className="text-pi-muted">Pick: </span>
+            <span className="text-pi-sky font-semibold">{item.predicted_outcome_label}</span>
           </div>
           <div className="text-[11px]">
-            <span className="text-slate-400">Result: </span>
-            <span className={`font-semibold ${item.is_correct ? "text-green-400" : "text-red-400"}`}>
+            <span className="text-pi-muted">Result: </span>
+            <span className={`font-semibold ${item.is_correct ? "text-pi-emerald" : "text-pi-rose"}`}>
               {item.actual_result_label}
             </span>
           </div>
-          {/* P&L */}
           {isPlay && (
-            <span className={`text-xs font-bold mt-0.5 ${
-              item.profit_loss_units > 0
-                ? "text-green-400"
-                : item.profit_loss_units < 0
-                ? "text-red-400"
-                : "text-slate-500"
+            <span className={`text-xs font-bold mt-0.5 tabular-nums ${
+              item.profit_loss_units > 0 ? "text-pi-emerald" :
+              item.profit_loss_units < 0 ? "text-pi-rose" : "text-pi-muted"
             }`}>
               {item.profit_loss_units > 0 ? "+" : ""}{item.profit_loss_units.toFixed(2)}u
             </span>
@@ -174,16 +163,15 @@ function HistoryRow({ item }: { item: PredictionHistory }) {
         </div>
       </div>
 
-      {/* Confidence + odds bar */}
-      <div className="mt-2 flex items-center gap-3 text-[10px] text-slate-500">
-        <span>Conf <span className="text-slate-300">{Math.round(item.confidence_score)}</span></span>
+      <div className="mt-2 flex items-center gap-3 text-[10px] text-pi-muted">
+        <span>Conf <span className="text-pi-secondary">{Math.round(item.confidence_score)}</span></span>
         {item.predicted_prob && (
-          <span>Prob <span className="text-slate-300">{Math.round(item.predicted_prob * 100)}%</span></span>
+          <span>Prob <span className="text-pi-secondary">{Math.round(item.predicted_prob * 100)}%</span></span>
         )}
         {item.recommended_odds && (
-          <span>Odds <span className="text-yellow-300">{item.recommended_odds.toFixed(2)}</span></span>
+          <span>Odds <span className="text-pi-amber">{item.recommended_odds.toFixed(2)}</span></span>
         )}
-        <span className="ml-auto text-slate-600">
+        <span className="ml-auto text-pi-muted/60">
           {new Date(item.resolved_at).toLocaleDateString()}
         </span>
       </div>

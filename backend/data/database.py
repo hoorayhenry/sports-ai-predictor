@@ -26,6 +26,53 @@ SyncSessionLocal = sessionmaker(bind=sync_engine, autoflush=False, autocommit=Fa
 async def init_db():
     async with async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _run_migrations(conn)
+
+
+async def _run_migrations(conn) -> None:
+    """
+    Safe incremental migrations for existing databases.
+    Only adds missing columns — never drops or alters existing ones.
+    Compatible with SQLite and PostgreSQL.
+    """
+    from sqlalchemy import text
+
+    is_sqlite = str(conn.engine.url).startswith("sqlite")
+
+    if is_sqlite:
+        # SQLite: check via PRAGMA table_info
+        result = await conn.execute(text("PRAGMA table_info(news_articles)"))
+        existing_cols = {row[1] for row in result.fetchall()}
+        if "status" not in existing_cols:
+            await conn.execute(
+                text("ALTER TABLE news_articles ADD COLUMN status VARCHAR(16) DEFAULT 'published'")
+            )
+
+        result = await conn.execute(text("PRAGMA table_info(participants)"))
+        participant_cols = {row[1] for row in result.fetchall()}
+        if "api_football_id" not in participant_cols:
+            await conn.execute(
+                text("ALTER TABLE participants ADD COLUMN api_football_id INTEGER")
+            )
+    else:
+        # PostgreSQL: check information_schema
+        result = await conn.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='news_articles' AND column_name='status'"
+        ))
+        if not result.fetchone():
+            await conn.execute(
+                text("ALTER TABLE news_articles ADD COLUMN status VARCHAR(16) DEFAULT 'published'")
+            )
+
+        result = await conn.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='participants' AND column_name='api_football_id'"
+        ))
+        if not result.fetchone():
+            await conn.execute(
+                text("ALTER TABLE participants ADD COLUMN api_football_id INTEGER")
+            )
 
 
 def init_db_sync():

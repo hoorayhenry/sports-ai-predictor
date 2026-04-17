@@ -1,7 +1,10 @@
 """Match listing and detail endpoints."""
+import asyncio
+import json as _json_mod
 from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -19,6 +22,16 @@ def _fmt_match(m: Match, odds: list = None, pred: Prediction = None, intelligenc
             o_dict[key] = {"bookmaker": o.bookmaker, "market": o.market,
                            "outcome": o.outcome, "price": o.price, "point": o.point}
 
+    # Extract live_minute from extra_data JSON
+    live_minute = None
+    if m.status == "live" and m.extra_data:
+        try:
+            import json as _json
+            extra = _json.loads(m.extra_data)
+            live_minute = extra.get("live_minute")
+        except Exception:
+            pass
+
     return {
         "id": m.id,
         "external_id": m.external_id,
@@ -32,6 +45,7 @@ def _fmt_match(m: Match, odds: list = None, pred: Prediction = None, intelligenc
         "away_elo": m.away.elo_rating if m.away else 1500,
         "match_date": m.match_date.isoformat() if m.match_date else None,
         "status": m.status,
+        "live_minute": live_minute,
         "home_score": m.home_score,
         "away_score": m.away_score,
         "result": m.result,
@@ -155,6 +169,199 @@ async def list_matches(
         "limit": limit,
         "has_more": (offset + limit) < total,
     }
+
+
+@router.get("/live/scores")
+async def get_live_scores(db: AsyncSession = Depends(get_async_session)):
+    """Return all currently live matches with real-time scores."""
+    result = await db.execute(
+        select(Match)
+        .join(Competition, Match.competition_id == Competition.id)
+        .join(Sport, Competition.sport_id == Sport.id)
+        .options(
+            selectinload(Match.home),
+            selectinload(Match.away),
+            selectinload(Match.competition).selectinload(Competition.sport),
+            selectinload(Match.predictions),
+            selectinload(Match.odds),
+        )
+        .where(Match.status == "live")
+        .order_by(Match.match_date)
+    )
+    matches = result.scalars().all()
+    return {
+        "live_count": len(matches),
+        "matches": [_fmt_match(m, list(m.odds), m.predictions[0] if m.predictions else None) for m in matches],
+    }
+
+
+@router.get("/live/stream")
+async def live_stream():
+    """
+    Server-Sent Events stream for live scores.
+
+    Polls ESPN directly every 10 seconds — bypasses the DB entirely.
+    Only pushes to the browser when scores actually change.
+    Heartbeat every 30s when nothing changes (keeps connection alive).
+
+    Latency: ~10-40s after a real goal (ESPN's own refresh rate is 30-60s).
+    """
+
+    def _fetch_from_espn() -> list[dict]:
+        """Blocking ESPN fetch — called in a thread pool to avoid blocking the loop."""
+        from data.live_scores import fetch_live_fixtures_espn
+        return fetch_live_fixtures_espn()
+
+    def _snapshot(fixtures: list[dict]) -> str:
+        """Stable fingerprint of current scores for change detection."""
+        key = sorted(
+            f"{f['external_id']}:{f['home_score']}:{f['away_score']}:{f['live_minute']}:{f['status']}"
+            for f in fixtures
+        )
+        return "|".join(key)
+
+    def _to_payload(fixtures: list[dict]) -> dict:
+        """Convert ESPN fixtures to the shape the frontend expects."""
+        live = [f for f in fixtures if f["status"] == "live"]
+        return {
+            "live_count": len(live),
+            "matches": [
+                {
+                    "id":           idx,
+                    "external_id":  f["external_id"],
+                    "sport":        "football",
+                    "sport_icon":   "⚽",
+                    "competition":  f["league_name"],
+                    "country":      f.get("country", ""),
+                    "home_team":    f["home_team"],
+                    "away_team":    f["away_team"],
+                    "home_score":   f["home_score"],
+                    "away_score":   f["away_score"],
+                    "status":       f["status"],
+                    "live_minute":  f["live_minute"],
+                    "match_date":   f["match_date"],
+                    "home_elo":     1500,
+                    "away_elo":     1500,
+                    "result":       None,
+                    "odds":         [],
+                    "prediction":   None,
+                    "intelligence": None,
+                }
+                for idx, f in enumerate(live)
+            ],
+            "source": "espn",
+            "ts": __import__("time").time(),
+        }
+
+    async def _db_seed_payload() -> dict | None:
+        """
+        Read currently-live matches from the DB — but only ones that are
+        plausibly still in play:
+          • match_date within the last 4 hours (covers 90min + stoppages)
+          • live_minute <= 120 (guard against the minute=900+ stale rows)
+        """
+        try:
+            import json as _js
+            from data.database import AsyncSessionLocal
+            cutoff = datetime.utcnow() - timedelta(hours=4)
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(Match)
+                    .join(Competition, Match.competition_id == Competition.id)
+                    .join(Sport, Competition.sport_id == Sport.id)
+                    .options(
+                        selectinload(Match.home),
+                        selectinload(Match.away),
+                        selectinload(Match.competition).selectinload(Competition.sport),
+                        selectinload(Match.predictions),
+                        selectinload(Match.odds),
+                    )
+                    .where(
+                        Match.status == "live",
+                        Match.match_date >= cutoff,
+                    )
+                    .order_by(Match.match_date)
+                )
+                db_matches = result.scalars().all()
+
+            # Drop rows where live_minute is clearly stale (> 120)
+            def _live_min(m: Match) -> int | None:
+                if m.extra_data:
+                    try:
+                        return _js.loads(m.extra_data).get("live_minute")
+                    except Exception:
+                        pass
+                return None
+
+            valid = [m for m in db_matches if (_live_min(m) or 0) <= 120]
+            if not valid:
+                return None
+            return {
+                "live_count": len(valid),
+                "matches": [_fmt_match(m, list(m.odds), m.predictions[0] if m.predictions else None) for m in valid],
+                "source": "db_seed",
+                "ts": __import__("time").time(),
+            }
+        except Exception:
+            return None
+
+    async def generate():
+        try:
+            prev_snapshot = ""
+            last_push     = 0.0
+            POLL_INTERVAL = 10   # seconds between ESPN checks
+            HEARTBEAT     = 30   # push even if no change (keeps connection alive)
+
+            # ── Seed immediately from DB so the page isn't blank ──────
+            seed = await _db_seed_payload()
+            if seed:
+                yield f"data: {_json_mod.dumps(seed)}\n\n"
+                last_push = __import__("time").time()
+
+            while True:
+                try:
+                    # Run blocking ESPN fetch in thread pool
+                    fixtures = await asyncio.get_event_loop().run_in_executor(
+                        None, _fetch_from_espn
+                    )
+                    snap    = _snapshot(fixtures)
+                    now     = __import__("time").time()
+                    changed = snap != prev_snapshot
+                    due     = (now - last_push) >= HEARTBEAT
+
+                    # Only skip pushing if ESPN returned 0 AND we have DB seed
+                    # data already showing — avoids blanking the screen on flaky fetches
+                    espn_has_data = len(fixtures) > 0
+
+                    if changed or due:
+                        if espn_has_data or not seed:
+                            payload       = _to_payload(fixtures)
+                            payload["changed"] = changed
+                            prev_snapshot = snap
+                            last_push     = now
+                            yield f"data: {_json_mod.dumps(payload)}\n\n"
+                        else:
+                            # ESPN returned 0 — re-push DB seed to keep connection alive
+                            last_push = now
+                            yield f"data: {_json_mod.dumps({**seed, 'ts': now})}\n\n"
+
+                except Exception as e:
+                    yield f"data: {_json_mod.dumps({'error': str(e), 'live_count': 0, 'matches': []})}\n\n"
+
+                await asyncio.sleep(POLL_INTERVAL)
+
+        except asyncio.CancelledError:
+            pass
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection":    "keep-alive",
+        },
+    )
 
 
 @router.get("/{match_id}")

@@ -400,3 +400,173 @@ async def resolve_all(background_tasks: BackgroundTasks):
 
     background_tasks.add_task(_run)
     return {"status": "queued"}
+
+
+@router.get("/analytics/system")
+async def system_analytics(db: AsyncSession = Depends(get_async_session)):
+    """System health and intelligence pipeline stats for the analytics dashboard."""
+    from data.db_models.models import IntelligenceSignal, NewsArticle
+
+    now = datetime.utcnow()
+    last_24h = now - timedelta(hours=24)
+    last_48h = now - timedelta(hours=48)
+
+    # Prediction counts
+    total_predictions = (await db.execute(
+        select(func.count()).select_from(Prediction)
+    )).scalar_one()
+
+    predictions_today = (await db.execute(
+        select(func.count()).select_from(Prediction).where(
+            Prediction.created_at >= now.replace(hour=0, minute=0, second=0)
+        )
+    )).scalar_one()
+
+    # Decision counts — join Match to filter by date
+    play_count = (await db.execute(
+        select(func.count()).select_from(MatchDecision)
+        .join(Match, Match.id == MatchDecision.match_id)
+        .where(
+            MatchDecision.ai_decision == "PLAY",
+            Match.match_date >= now,
+            Match.status == "scheduled",
+        )
+    )).scalar_one()
+
+    # Intelligence signals last 24h
+    intel_q = await db.execute(
+        select(IntelligenceSignal).where(IntelligenceSignal.created_at >= last_24h)
+    )
+    intel_signals = intel_q.scalars().all()
+    signal_counts = {}
+    for s in intel_signals:
+        signal_counts[s.signal_type] = signal_counts.get(s.signal_type, 0) + 1
+
+    latest_intel = (await db.execute(
+        select(IntelligenceSignal.created_at).order_by(IntelligenceSignal.created_at.desc()).limit(1)
+    )).scalar_one_or_none()
+
+    # News articles
+    try:
+        news_total = (await db.execute(
+            select(func.count()).select_from(NewsArticle)
+        )).scalar_one()
+        news_last_24h = (await db.execute(
+            select(func.count()).select_from(NewsArticle).where(
+                NewsArticle.created_at >= last_24h
+            )
+        )).scalar_one()
+        latest_news_time = (await db.execute(
+            select(NewsArticle.created_at).order_by(NewsArticle.created_at.desc()).limit(1)
+        )).scalar_one_or_none()
+    except Exception:
+        news_total = 0
+        news_last_24h = 0
+        latest_news_time = None
+
+    # Recent performance (last 30 days)
+    perf_logs = (await db.execute(
+        select(PerformanceLog).where(
+            PerformanceLog.log_date >= now - timedelta(days=30),
+            PerformanceLog.ai_decision == "PLAY",
+            PerformanceLog.is_correct.isnot(None),
+        )
+    )).scalars().all()
+    resolved = len(perf_logs)
+    wins_30d = sum(1 for l in perf_logs if l.is_correct)
+
+    # Confidence distribution from active decisions
+    conf_buckets = {"high": 0, "medium": 0, "low": 0}
+    active_decisions = (await db.execute(
+        select(MatchDecision)
+        .join(Match, Match.id == MatchDecision.match_id)
+        .where(
+            MatchDecision.ai_decision == "PLAY",
+            Match.match_date >= now,
+            Match.status == "scheduled",
+        )
+    )).scalars().all()
+    for d in active_decisions:
+        if d.confidence_score >= 75:
+            conf_buckets["high"] += 1
+        elif d.confidence_score >= 60:
+            conf_buckets["medium"] += 1
+        else:
+            conf_buckets["low"] += 1
+
+    return {
+        "predictions": {
+            "total": total_predictions,
+            "today": predictions_today,
+            "active_plays": play_count,
+        },
+        "intelligence": {
+            "signals_last_24h": len(intel_signals),
+            "by_type": signal_counts,
+            "last_run": latest_intel.isoformat() if latest_intel else None,
+        },
+        "news": {
+            "total_articles": news_total,
+            "articles_last_24h": news_last_24h,
+            "last_fetched": latest_news_time.isoformat() if latest_news_time else None,
+        },
+        "performance": {
+            "resolved_30d": resolved,
+            "wins_30d": wins_30d,
+            "win_rate_30d": round(wins_30d / resolved, 3) if resolved else None,
+        },
+        "confidence_distribution": conf_buckets,
+        "model_info": {
+            "type": "XGBoost + LightGBM ensemble",
+            "training": "51,000+ resolved matches (2020–present) — grows weekly",
+            "real_time": "Intelligence signals (news/injuries) adjust confidence ±15 pts",
+            "retraining": "Automatic weekly retraining every Sunday 03:00 UTC",
+            "features": [
+                "ELO ratings", "H2H form", "Goals scored/conceded (last 5)",
+                "Home/away advantage", "Competition tier", "Rest days",
+                "Betting market odds", "Over 2.5 goals history",
+            ],
+        },
+    }
+
+
+@router.get("/analytics/training-history")
+async def training_history(db: AsyncSession = Depends(get_async_session)):
+    """Return model training log — shows continuous learning progress."""
+    import json as _json
+    from data.db_models.models import ModelTrainingLog
+
+    try:
+        result = await db.execute(
+            select(ModelTrainingLog).order_by(ModelTrainingLog.trained_at.desc()).limit(50)
+        )
+        logs = result.scalars().all()
+    except Exception:
+        return {"logs": [], "message": "Training log table not yet created — restart backend"}
+
+    return {
+        "logs": [
+            {
+                "id": l.id,
+                "sport": l.sport_key,
+                "status": l.status,
+                "training_rows": l.training_rows,
+                "accuracy": _json.loads(l.accuracy_json) if l.accuracy_json else {},
+                "trained_at": l.trained_at.isoformat(),
+            }
+            for l in logs
+        ]
+    }
+
+
+@router.post("/analytics/trigger-retrain")
+async def trigger_retrain(background_tasks: BackgroundTasks):
+    """Manually trigger a full model retrain (runs in background, takes ~5-10 min)."""
+    def _run():
+        from data.database import get_sync_session
+        from ml.continuous_learner import run_full_retrain
+        with get_sync_session() as db:
+            run_full_retrain(db)
+
+    background_tasks.add_task(_run)
+    return {"status": "started", "message": "Retraining all sport models in background. Check /analytics after ~10 minutes."}

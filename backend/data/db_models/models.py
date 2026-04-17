@@ -60,6 +60,8 @@ class Participant(Base):
     logo_url: Mapped[Optional[str]] = mapped_column(String(256))
     elo_rating: Mapped[float] = mapped_column(Float, default=1500.0)
     elo_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    # API-Football numeric team ID — used for lineup/injury/xG lookups
+    api_football_id: Mapped[Optional[int]] = mapped_column(Integer, index=True)
 
 
 class Match(Base):
@@ -288,3 +290,34 @@ class IntelligenceSignal(Base):
     __table_args__ = (
         Index("ix_intel_match_team", "match_id", "team_id"),
     )
+
+
+class ModelTrainingLog(Base):
+    """Tracks every continuous learning retraining run."""
+    __tablename__ = "model_training_logs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sport_key: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="trained")   # trained|skipped|error
+    training_rows: Mapped[int] = mapped_column(Integer, default=0)
+    accuracy_json: Mapped[Optional[str]] = mapped_column(Text)           # {market: log_loss, ...}
+    trained_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class NewsArticle(Base):
+    """Rewritten news articles for the PlaySigma news feed."""
+    __tablename__ = "news_articles"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(512))
+    slug: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    source_url: Mapped[str] = mapped_column(String(1024))
+    source_name: Mapped[str] = mapped_column(String(128), default="")
+    category: Mapped[str] = mapped_column(String(64), default="football")  # football|transfers|injuries|general
+    summary: Mapped[str] = mapped_column(Text, default="")   # 1-2 sentence hook
+    body: Mapped[str] = mapped_column(Text, default="")      # rewritten full article
+    tags: Mapped[Optional[str]] = mapped_column(Text)        # comma-separated team/player names
+    image_url: Mapped[Optional[str]] = mapped_column(String(1024))
+    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    # "published" = AI-rewritten by Gemini (safe to serve publicly)
+    # "draft"     = raw scraped text only — held back until Gemini rewrites it
+    status: Mapped[str] = mapped_column(String(16), default="published", index=True)

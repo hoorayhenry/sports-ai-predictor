@@ -38,7 +38,7 @@ export default function MatchDetailPage() {
   return (
     <div className="min-h-screen pb-20 md:pb-6">
       {/* Top bar */}
-      <div className="sticky top-0 z-10 bg-[#0f172a]/90 backdrop-blur border-b border-slate-800 px-4 py-3 flex items-center gap-3">
+      <div className="sticky top-0 z-10 navbar-glass px-4 py-3 flex items-center gap-3">
         <Link to="/" className="text-slate-400 hover:text-white transition-colors">
           <ArrowLeft size={20} />
         </Link>
@@ -83,7 +83,7 @@ export default function MatchDetailPage() {
         {pred && (
           <div className={`card p-4 ${pred.is_value_bet ? "border-yellow-500/40" : ""}`}>
             <div className="flex items-center gap-2 mb-4">
-              <h3 className="font-semibold">AI Prediction</h3>
+              <h3 className="font-semibold font-display">Prediction</h3>
               {pred.is_value_bet && (
                 <span className="flex items-center gap-1 bg-yellow-500/20 text-yellow-400 text-xs px-2 py-0.5 rounded-full font-semibold">
                   <Zap size={11} /> Value Bet
