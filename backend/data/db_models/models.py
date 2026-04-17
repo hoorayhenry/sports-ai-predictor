@@ -126,6 +126,13 @@ class Prediction(Base):
     over25_prob: Mapped[Optional[float]] = mapped_column(Float)
     btts_prob: Mapped[Optional[float]] = mapped_column(Float)
 
+    # All market probabilities — stores full Poisson + ML output as JSON
+    # Keys: result, over15, over25, over35, btts, home_cs, away_cs,
+    #       double_chance_1x/x2/12, dnb_home/away, ah_home/away_-0.5/+0.5/-1/+1,
+    #       home_win_to_nil, away_win_to_nil, btts_home_win, btts_draw, btts_away_win,
+    #       home_clean_sheet, away_clean_sheet, top_correct_scores
+    markets_json: Mapped[Optional[str]] = mapped_column(Text)
+
     # Value bet info (best opportunity found)
     is_value_bet: Mapped[bool] = mapped_column(Boolean, default=False)
     value_market: Mapped[Optional[str]] = mapped_column(String(32))    # h2h|totals|btts
@@ -176,7 +183,18 @@ class MatchDecision(Base):
 
     # Recommended odds and stake
     recommended_odds: Mapped[Optional[float]] = mapped_column(Float)
-    recommended_stake_pct: Mapped[Optional[float]] = mapped_column(Float)  # % of bankroll
+    recommended_stake_pct: Mapped[Optional[float]] = mapped_column(Float)  # % of bankroll (tiered Kelly)
+
+    # Value intelligence
+    skip_reason: Mapped[Optional[str]] = mapped_column(String(256))         # why it was skipped
+    market_prob: Mapped[Optional[float]] = mapped_column(Float)             # 1/odds implied probability
+    edge: Mapped[Optional[float]] = mapped_column(Float)                    # model_prob - market_prob
+    value_label: Mapped[Optional[str]] = mapped_column(String(16))          # strong_value|fair_value|no_value|no_odds
+
+    # CLV tracking — filled at decision time, updated when match kicks off
+    odds_at_decision: Mapped[Optional[float]] = mapped_column(Float)        # odds snapshot when decision was made
+    closing_odds: Mapped[Optional[float]] = mapped_column(Float)            # latest odds before kickoff
+    clv: Mapped[Optional[float]] = mapped_column(Float)                     # (odds_at_decision/closing_odds)-1, positive = beat market
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -238,6 +256,11 @@ class PerformanceLog(Base):
     actual_result: Mapped[Optional[str]] = mapped_column(String(16))
     is_correct: Mapped[Optional[bool]] = mapped_column(Boolean)
     profit_loss_units: Mapped[Optional[float]] = mapped_column(Float)  # +ve = profit
+
+    # Value tracking at time of decision
+    edge: Mapped[Optional[float]] = mapped_column(Float)
+    market_prob: Mapped[Optional[float]] = mapped_column(Float)
+    clv: Mapped[Optional[float]] = mapped_column(Float)
 
     log_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
@@ -325,6 +348,28 @@ class LeagueSeasonCache(Base):
         UniqueConstraint("league_slug", "season", "data_type",
                          name="uq_league_season_cache_key"),
         Index("ix_league_season_cache_lookup", "league_slug", "season", "data_type"),
+    )
+
+
+class PlayerStatsCache(Base):
+    """
+    Cached top-player stats fetched once per day from ESPN for leagues that
+    Sofascore's top-players endpoint does not support (NBA, NFL).
+
+    categories_json holds a JSON array of LeaderCat objects:
+      [{ name, abbr, leaders: [{ rank, name, value, display, player_id, headshot, team_id, team_name, team_logo }] }]
+    """
+    __tablename__ = "player_stats_cache"
+
+    id:              Mapped[int]      = mapped_column(primary_key=True)
+    league_key:      Mapped[str]      = mapped_column(String(32),  index=True)   # nba | nfl
+    season:          Mapped[int]      = mapped_column(Integer)
+    categories_json: Mapped[str]      = mapped_column(Text)
+    fetched_at:      Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("league_key", "season", name="uq_player_stats_cache_key"),
+        Index("ix_player_stats_cache_lookup", "league_key", "season"),
     )
 
 

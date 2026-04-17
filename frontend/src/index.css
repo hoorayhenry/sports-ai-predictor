@@ -259,6 +259,8 @@
 }
 
 @layer utilities {
+  .scrollbar-hide { scrollbar-width: none; -ms-overflow-style: none; }
+  .scrollbar-hide::-webkit-scrollbar { display: none; }
   .animate-fade-up { animation: fade-up 0.35s ease-out both; }
 
   /* ── Ambient ball — full-width sweep ──────────────────────────── */

@@ -11,8 +11,11 @@ from fastapi import APIRouter, Query, HTTPException
 
 router = APIRouter(prefix="/standings", tags=["standings"])
 
-_ESPN_V2   = "https://site.api.espn.com/apis/v2/sports/soccer"
-_ESPN_SITE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
+_ESPN_V2_BASE   = "https://site.api.espn.com/apis/v2/sports"
+_ESPN_SITE_BASE = "https://site.api.espn.com/apis/site/v2/sports"
+# Legacy aliases kept for the soccer-only helpers below
+_ESPN_V2   = f"{_ESPN_V2_BASE}/soccer"
+_ESPN_SITE = f"{_ESPN_SITE_BASE}/soccer"
 _AF_BASE   = "https://v3.football.api-sports.io"
 
 _BROWSER_HEADERS = {
@@ -50,6 +53,32 @@ LEAGUES = [
 ]
 
 _SLUG_META = {s: {"name": n, "country": c, "flag": f} for s, n, c, f in LEAGUES}
+
+# Additional slugs for multi-sport ESPN support
+_SLUG_META.update({
+    "basketball/nba":                      {"name": "NBA",                "country": "USA",       "flag": "🇺🇸"},
+    "basketball/wnba":                     {"name": "WNBA",               "country": "USA",       "flag": "🇺🇸"},
+    "basketball/mens-college-basketball":  {"name": "NCAA Basketball",    "country": "USA",       "flag": "🇺🇸"},
+    "football/nfl":                        {"name": "NFL",                "country": "USA",       "flag": "🇺🇸"},
+    "football/college-football":           {"name": "NCAA Football",      "country": "USA",       "flag": "🇺🇸"},
+    "hockey/nhl":                          {"name": "NHL",                "country": "USA/Canada","flag": "🏒"},
+    "hockey/ahl":                          {"name": "AHL",                "country": "USA/Canada","flag": "🏒"},
+    "baseball/mlb":                        {"name": "MLB",                "country": "USA",       "flag": "🇺🇸"},
+    "tennis/atp":                          {"name": "ATP Tour",           "country": "World",     "flag": "🎾"},
+    "tennis/wta":                          {"name": "WTA Tour",           "country": "World",     "flag": "🎾"},
+    "rugby/premiership":                   {"name": "Premiership",        "country": "England",   "flag": "🏴󠁧󠁢󠁥󠁮󠁧󠁿"},
+    "rugby/top14":                         {"name": "Top 14",             "country": "France",    "flag": "🇫🇷"},
+    "rugby/super-rugby":                   {"name": "Super Rugby Pacific","country": "Pacific",   "flag": "🌏"},
+    "rugby/six-nations":                   {"name": "Six Nations",        "country": "Europe",    "flag": "🇪🇺"},
+    "rugby/rugby-championship":            {"name": "Rugby Championship", "country": "World",     "flag": "🌍"},
+    "cricket/ipl":                         {"name": "IPL",                "country": "India",     "flag": "🇮🇳"},
+    "cricket/bbl":                         {"name": "BBL",                "country": "Australia", "flag": "🇦🇺"},
+    "cricket/cpl":                         {"name": "CPL",                "country": "Caribbean", "flag": "🌎"},
+    "handball/ehf-champions-league":       {"name": "EHF Champions League","country": "Europe",   "flag": "🇪🇺"},
+    "handball/dkb-handball-bundesliga":    {"name": "Handball Bundesliga","country": "Germany",   "flag": "🇩🇪"},
+    "volleyball/ncaa-volleyball":          {"name": "NCAA Volleyball",    "country": "USA",       "flag": "🇺🇸"},
+    "mma/ufc":                             {"name": "UFC",                "country": "World",     "flag": "🥊"},
+})
 
 # ESPN slug → API-Football league ID
 LEAGUE_API_IDS: dict[str, int] = {
@@ -265,14 +294,25 @@ def _extract_groups(data: dict) -> list[list[dict]]:
 def _fetch_espn(slug: str, season: int = CURRENT_SEASON) -> dict | None:
     meta   = _SLUG_META.get(slug, {})
     params = {"season": season} if season != CURRENT_SEASON else {}
-    for base in (_ESPN_V2, _ESPN_SITE):
+
+    # Slug may be "eng.1" (soccer) or "basketball/nba", "hockey/nhl", etc.
+    # For soccer slugs (no "/" prefix with a sport), use the soccer base URLs.
+    # For multi-sport slugs like "basketball/nba", build the URL directly.
+    if "/" in slug:
+        # e.g. "basketball/nba" → https://site.api.espn.com/apis/v2/sports/basketball/nba/standings
+        bases = [
+            f"{_ESPN_V2_BASE}/{slug}/standings",
+            f"{_ESPN_SITE_BASE}/{slug}/standings",
+        ]
+    else:
+        bases = [
+            f"{_ESPN_V2}/{slug}/standings",
+            f"{_ESPN_SITE}/{slug}/standings",
+        ]
+
+    for url in bases:
         try:
-            resp = httpx.get(
-                f"{base}/{slug}/standings",
-                params=params,
-                headers=_BROWSER_HEADERS,
-                timeout=12,
-            )
+            resp = httpx.get(url, params=params, headers=_BROWSER_HEADERS, timeout=12)
             if resp.status_code != 200:
                 continue
             data   = resp.json()

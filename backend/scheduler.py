@@ -328,11 +328,11 @@ def job_live_scores():
     except Exception as e:
         logger.error(f"[SCHEDULER] Live scores job failed: {e}")
     finally:
-        # Adaptive interval: poll every 30s during live matches (Sofascore updates every 20-30s),
+        # Adaptive interval: poll every 20s during live matches (Sofascore updates every ~20s),
         # every 5 min when no live matches to avoid unnecessary polling.
         global _scheduler
         if _scheduler and _scheduler.running:
-            next_interval = 30 if live_count > 0 else 300
+            next_interval = 20 if live_count > 0 else 300
             try:
                 _scheduler.reschedule_job(
                     "live_scores",
@@ -431,6 +431,52 @@ def job_retry_drafts():
         logger.info(f"[SCHEDULER] Draft retry: {promoted} articles promoted to published")
     except Exception as e:
         logger.error(f"[SCHEDULER] Draft retry job failed: {e}")
+
+
+def job_history_backfill():
+    """
+    10-year historical data backfill for all sports.
+    Runs ONCE on startup (if DB is thin) and then weekly to catch any gaps.
+    Purpose: user experience (historical records, H2H depth for features).
+    Training uses only the last 2 years — see build_training_matrix().
+
+    This is a long-running job (hours for a full 10-year fetch).
+    It is safe to interrupt: checkpoint file resumes where it left off.
+    """
+    logger.info("[SCHEDULER] Checking if history backfill is needed...")
+    try:
+        from data.database import get_sync_session
+        from data.loaders.history_backfill import needs_backfill, run_backfill
+
+        with get_sync_session() as db:
+            if not needs_backfill(db, years_back=10):
+                logger.info("[SCHEDULER] Backfill not needed — DB has sufficient history")
+                return
+
+        logger.info("[SCHEDULER] Starting 10-year history backfill in background...")
+        with get_sync_session() as db:
+            results = run_backfill(db, years_back=10)
+        logger.info(f"[SCHEDULER] Backfill complete: {results}")
+    except Exception as e:
+        logger.error(f"[SCHEDULER] History backfill failed: {e}")
+
+
+def job_fetch_player_stats():
+    """
+    Fetch NBA and NFL top-player stats from ESPN and cache in DB.
+    Runs daily at 03:30 UTC — after the historical ingest so the DB is warm.
+    One ESPN call per league, no API key required.
+    """
+    logger.info("[SCHEDULER] Fetching NBA/NFL player stats...")
+    try:
+        from data.database import get_sync_session
+        from data.loaders.player_stats import refresh_player_stats_cache
+
+        with get_sync_session() as db:
+            results = refresh_player_stats_cache(db)
+        logger.info(f"[SCHEDULER] Player stats: {results}")
+    except Exception as e:
+        logger.error(f"[SCHEDULER] Player stats job failed: {e}")
 
 
 def job_fetch_odds():
@@ -536,14 +582,14 @@ def start_scheduler():
     global _scheduler
     _scheduler = BackgroundScheduler(timezone="UTC")
 
-    # Live scores — adaptive: 30s when matches are live (Sofascore updates every 20-30s),
+    # Live scores — adaptive: 20s when matches are live (aligned with Sofascore's ~20s update cadence),
     # 5 min when no live matches. SSE pushes score changes to clients immediately.
     _scheduler.add_job(
         job_live_scores,
-        IntervalTrigger(seconds=30),
+        IntervalTrigger(seconds=20),
         id="live_scores",
         replace_existing=True,
-        misfire_grace_time=15,
+        misfire_grace_time=10,
         next_run_time=datetime.utcnow(),
     )
 
@@ -645,6 +691,25 @@ def start_scheduler():
         CronTrigger(hour=2, minute=0),
         id="ingest_multi_sport",
         replace_existing=True,
+    )
+
+    # NBA + NFL player stats — daily at 03:30 UTC (after historical ingest)
+    _scheduler.add_job(
+        job_fetch_player_stats,
+        CronTrigger(hour=3, minute=30),
+        id="fetch_player_stats",
+        replace_existing=True,
+        next_run_time=datetime.utcnow(),   # warm cache immediately on startup
+    )
+
+    # 10-year history backfill — runs on startup if DB is thin, then weekly
+    # Long-running job (hours); checkpoint makes it safe to interrupt/resume
+    _scheduler.add_job(
+        job_history_backfill,
+        CronTrigger(day_of_week="mon", hour=1, minute=0),
+        id="history_backfill",
+        replace_existing=True,
+        next_run_time=datetime.utcnow(),   # check immediately on startup
     )
 
     # Weekly model retraining — Sunday 03:00 UTC (after daily ingest finishes)

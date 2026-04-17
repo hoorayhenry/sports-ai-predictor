@@ -130,7 +130,8 @@ export default function MatchCard({ match, decision: dec }: Props) {
   const isValueBet  = pred?.is_value_bet ?? dec?.is_value_bet ?? false;
   const ev          = pred?.expected_value ?? dec?.expected_value;
 
-  const h2hOdds = match?.odds?.filter((o) => o.market === "h2h") ?? [];
+  const oddsArr = Array.isArray(match?.odds) ? match.odds : [];
+  const h2hOdds = oddsArr.filter((o) => o.market === "h2h");
   const bestHome = Math.max(0, ...h2hOdds.filter((o) => o.outcome === "home").map((o) => o.price));
   const bestDraw = Math.max(0, ...h2hOdds.filter((o) => o.outcome === "draw").map((o) => o.price));
   const bestAway = Math.max(0, ...h2hOdds.filter((o) => o.outcome === "away").map((o) => o.price));

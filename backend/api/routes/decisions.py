@@ -21,6 +21,22 @@ router = APIRouter(prefix="/decisions", tags=["decisions"])
 
 
 def _fmt_decision(m: Match, md: MatchDecision, pred: Optional[Prediction]) -> dict:
+    markets = None
+    if pred and pred.markets_json:
+        try:
+            markets = json.loads(pred.markets_json)
+        except Exception:
+            pass
+
+    # Market implied probability and edge
+    market_prob = getattr(md, "market_prob", None)
+    edge        = getattr(md, "edge", None)
+    edge_pct    = round(edge * 100, 1) if edge is not None else None
+
+    # Market-implied prob as percentage for display
+    market_prob_pct = round(market_prob * 100, 1) if market_prob is not None else None
+    model_prob_pct  = round(md.top_prob * 100, 1) if md.top_prob else None
+
     return {
         "match_id":          m.id,
         "sport":             m.competition.sport.key if m.competition and m.competition.sport else None,
@@ -31,22 +47,33 @@ def _fmt_decision(m: Match, md: MatchDecision, pred: Optional[Prediction]) -> di
         "away_team":         m.away.name if m.away else "TBD",
         "match_date":        m.match_date.isoformat() if m.match_date else None,
         "status":            m.status,
-        # Decision fields
-        "ai_decision":       md.ai_decision,
-        "confidence_score":  md.confidence_score,
-        "prob_tag":          md.prob_tag,
-        "top_prob":          md.top_prob,
-        "predicted_outcome": md.predicted_outcome,
-        "has_volatility":    md.has_volatility,
-        "volatility_reason": md.volatility_reason,
-        "recommended_odds":  md.recommended_odds,
+        # Decision
+        "ai_decision":           md.ai_decision,
+        "confidence_score":      md.confidence_score,
+        "prob_tag":              md.prob_tag,
+        "top_prob":              md.top_prob,
+        "predicted_outcome":     md.predicted_outcome,
+        "has_volatility":        md.has_volatility,
+        "volatility_reason":     md.volatility_reason,
+        "recommended_odds":      md.recommended_odds,
         "recommended_stake_pct": md.recommended_stake_pct,
+        # SKIP reason (null on PLAY picks)
+        "skip_reason":           getattr(md, "skip_reason", None),
+        # Value intelligence
+        "market_prob":     market_prob,
+        "market_prob_pct": market_prob_pct,
+        "model_prob_pct":  model_prob_pct,
+        "edge":            edge,
+        "edge_pct":        edge_pct,
+        "value_label":     getattr(md, "value_label", None),
+        # CLV
+        "clv":             getattr(md, "clv", None),
         # Score breakdown
         "score_breakdown": {
-            "probability":   round(md.prob_component, 1),
+            "probability":    round(md.prob_component, 1),
             "expected_value": round(md.ev_component, 1),
-            "form":          round(md.form_component, 1),
-            "consistency":   round(md.consistency_component, 1),
+            "form":           round(md.form_component, 1),
+            "consistency":    round(md.consistency_component, 1),
         },
         # Prediction fields
         "home_win_prob":  pred.home_win_prob if pred else None,
@@ -56,6 +83,7 @@ def _fmt_decision(m: Match, md: MatchDecision, pred: Optional[Prediction]) -> di
         "btts_prob":      pred.btts_prob if pred else None,
         "is_value_bet":   pred.is_value_bet if pred else False,
         "expected_value": pred.expected_value if pred else None,
+        "markets":        markets,
     }
 
 
@@ -69,6 +97,24 @@ async def daily_picks(
     """Top PLAY decisions within the next N days, sorted by confidence."""
     cutoff = datetime.utcnow() + timedelta(days=days)
 
+    # ── Total analysed count (all decisions in window) ────────────────
+    total_q = (
+        select(func.count())
+        .select_from(Match)
+        .join(MatchDecision, Match.id == MatchDecision.match_id)
+        .join(Competition, Match.competition_id == Competition.id)
+        .join(Sport, Competition.sport_id == Sport.id)
+        .where(
+            Match.status == "scheduled",
+            Match.match_date >= datetime.utcnow(),
+            Match.match_date <= cutoff,
+        )
+    )
+    if sport:
+        total_q = total_q.where(Sport.key == sport)
+    total_analysed = (await db.execute(total_q)).scalar_one()
+
+    # ── PLAY picks ────────────────────────────────────────────────────
     q = (
         select(Match)
         .join(MatchDecision, Match.id == MatchDecision.match_id)
@@ -105,7 +151,14 @@ async def daily_picks(
         pred = m.predictions[0] if m.predictions else None
         if md:
             out.append(_fmt_decision(m, md, pred))
-    return out
+
+    return {
+        "picks":          out,
+        "total_analysed": total_analysed,
+        "total_plays":    len(out),
+        "total_skipped":  total_analysed - len(out),
+        "selection_rate": round(len(out) / total_analysed * 100, 1) if total_analysed else 0,
+    }
 
 
 @router.get("/all")
@@ -360,6 +413,145 @@ async def optimization_weights(db: AsyncSession = Depends(get_async_session)):
     ]
 
 
+@router.get("/analytics/calibration")
+async def calibration(
+    sport: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Probability calibration — are our confidence buckets honest?
+
+    Groups resolved PLAY bets by predicted probability bucket and compares
+    the predicted win rate vs actual win rate.
+
+    A well-calibrated model: 70% confidence bucket wins ~70% of the time.
+    If the 80% bucket only wins 55%, the model is overconfident.
+    """
+    q = select(PerformanceLog).where(
+        PerformanceLog.ai_decision == "PLAY",
+        PerformanceLog.is_correct.isnot(None),
+        PerformanceLog.predicted_prob.isnot(None),
+    )
+    if sport:
+        q = q.where(PerformanceLog.sport_key == sport)
+
+    result = await db.execute(q)
+    logs   = result.scalars().all()
+
+    # Group into 5-point probability buckets
+    buckets: dict[str, dict] = {}
+    for lg in logs:
+        prob = lg.predicted_prob
+        if prob is None:
+            continue
+        lo   = int(prob * 100 // 5) * 5
+        hi   = lo + 5
+        key  = f"{lo}-{hi}%"
+        if key not in buckets:
+            buckets[key] = {"lo": lo, "wins": 0, "total": 0}
+        buckets[key]["total"] += 1
+        if lg.is_correct:
+            buckets[key]["wins"] += 1
+
+    calibration_rows = []
+    for key, v in sorted(buckets.items(), key=lambda x: x[1]["lo"]):
+        total        = v["total"]
+        wins         = v["wins"]
+        actual_rate  = wins / total if total > 0 else 0
+        predicted    = (v["lo"] + 2.5) / 100  # midpoint
+        gap          = actual_rate - predicted  # positive = better than expected
+        calibration_rows.append({
+            "bucket":          key,
+            "predicted_rate":  round(predicted, 3),
+            "actual_rate":     round(actual_rate, 3),
+            "gap":             round(gap, 3),
+            "wins":            wins,
+            "total":           total,
+            "well_calibrated": abs(gap) <= 0.05,
+        })
+
+    total_resolved = sum(v["total"] for v in buckets.values())
+    total_wins     = sum(v["wins"] for v in buckets.values())
+
+    return {
+        "calibration":      calibration_rows,
+        "total_resolved":   total_resolved,
+        "overall_accuracy": round(total_wins / total_resolved, 3) if total_resolved else None,
+        "note": "Gap = actual - predicted. Positive = better than model predicted. Well-calibrated = gap within ±5%.",
+    }
+
+
+@router.get("/analytics/clv")
+async def clv_stats(
+    sport: Optional[str] = Query(None),
+    days: int = Query(30),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Closing Line Value stats — did we consistently beat the market?
+
+    Positive average CLV means we got better odds than the market's final
+    assessment. This is the strongest proof that edge is real, not noise.
+
+    CLV = (odds_at_decision / closing_odds) - 1
+    Positive = we beat the closing line (got better odds than market closed at).
+    """
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
+    q = (
+        select(PerformanceLog)
+        .where(
+            PerformanceLog.log_date >= cutoff,
+            PerformanceLog.ai_decision == "PLAY",
+            PerformanceLog.clv.isnot(None),
+        )
+        .order_by(PerformanceLog.log_date.desc())
+    )
+    if sport:
+        q = q.where(PerformanceLog.sport_key == sport)
+
+    result = await db.execute(q)
+    logs   = result.scalars().all()
+
+    if not logs:
+        return {
+            "message": "No CLV data yet — CLV is computed when matches resolve.",
+            "period_days": days,
+            "total": 0,
+        }
+
+    clv_vals   = [lg.clv for lg in logs if lg.clv is not None]
+    avg_clv    = sum(clv_vals) / len(clv_vals) if clv_vals else 0
+    beat_market = sum(1 for v in clv_vals if v > 0)
+
+    # By sport
+    by_sport: dict = {}
+    for lg in logs:
+        s = lg.sport_key
+        if s not in by_sport:
+            by_sport[s] = {"clv_sum": 0.0, "count": 0, "beat": 0}
+        by_sport[s]["clv_sum"] += lg.clv or 0
+        by_sport[s]["count"]   += 1
+        if (lg.clv or 0) > 0:
+            by_sport[s]["beat"] += 1
+
+    return {
+        "period_days":       days,
+        "total_picks":       len(clv_vals),
+        "avg_clv_pct":       round(avg_clv * 100, 2),
+        "beat_market_pct":   round(beat_market / len(clv_vals) * 100, 1) if clv_vals else 0,
+        "verdict":           "Real edge detected" if avg_clv > 0.02 else ("Marginal" if avg_clv > 0 else "No CLV edge"),
+        "by_sport": {
+            s: {
+                "avg_clv_pct": round(v["clv_sum"] / v["count"] * 100, 2),
+                "beat_market_pct": round(v["beat"] / v["count"] * 100, 1),
+                "total": v["count"],
+            }
+            for s, v in by_sport.items()
+        },
+    }
+
+
 @router.post("/run-now")
 async def run_decisions_now(
     background_tasks: BackgroundTasks,
@@ -517,14 +709,20 @@ async def system_analytics(db: AsyncSession = Depends(get_async_session)):
         },
         "confidence_distribution": conf_buckets,
         "model_info": {
-            "type": "XGBoost + LightGBM ensemble",
-            "training": "51,000+ resolved matches (2020–present) — grows weekly",
+            "type": "XGBoost + LightGBM ensemble (isotonic calibrated)",
+            "training": "2-year rolling window — time-based split, recency-weighted samples",
+            "markets": "7 ML markets (1X2, O1.5/2.5/3.5, BTTS, Home CS, Away CS) + 25+ Poisson-derived",
+            "decision_gate": "Value-driven: probability + confidence + EV ≥ 3% + edge ≥ 5% + low-odds penalty",
+            "kelly": "Tiered Kelly — full/75%/50%/25% based on confidence + edge tier",
+            "clv": "Closing Line Value tracked per pick to verify real edge",
+            "drift": "Automatic drift detection — confidence penalised if log_loss degrades > 5%",
             "real_time": "Intelligence signals (news/injuries) adjust confidence ±15 pts",
             "retraining": "Automatic weekly retraining every Sunday 03:00 UTC",
             "features": [
                 "ELO ratings", "H2H form", "Goals scored/conceded (last 5)",
                 "Home/away advantage", "Competition tier", "Rest days",
-                "Betting market odds", "Over 2.5 goals history",
+                "Betting market odds (edge vs implied prob)", "Over 2.5 history",
+                "Dixon-Coles Poisson strength model",
             ],
         },
     }

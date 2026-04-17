@@ -530,7 +530,24 @@ def build_row(db: Session, match: Match, df: pd.DataFrame, has_draw: bool = True
     }
 
 
-def build_training_matrix(db: Session, sport_key: str) -> pd.DataFrame:
+def build_training_matrix(
+    db: Session,
+    sport_key: str,
+    training_years: int = 2,       # hard cutoff: only train on last N years
+) -> pd.DataFrame:
+    """
+    Build training matrix for the ML model.
+
+    Key design decisions:
+    - ALL historical matches are loaded into `df` for feature computation
+      (H2H lookups, form context, ELO).  Historical depth improves features.
+    - But only matches from the last `training_years` years become training rows.
+      This prevents stale team identities from polluting the model.
+      (Real Madrid 2010 != Real Madrid 2025.)
+    - Within the training window, recency weights (3x/2x/1.5x) further
+      prioritise the most recent form.
+    - Train/test split is TIME-BASED (not random) to prevent data leakage.
+    """
     global _dc_model
     _dc_model = None   # Force fresh DC model fit each training run
 
@@ -543,7 +560,8 @@ def build_training_matrix(db: Session, sport_key: str) -> pd.DataFrame:
 
     has_draw = (sport_key == "football")
 
-    matches = (
+    # Load ALL finished matches for feature computation context
+    all_matches = (
         db.query(Match)
         .join(Competition)
         .filter(Competition.sport_id == sport.id, Match.result.isnot(None))
@@ -552,7 +570,7 @@ def build_training_matrix(db: Session, sport_key: str) -> pd.DataFrame:
         .all()
     )
 
-    if not matches:
+    if not all_matches:
         return pd.DataFrame()
 
     def _match_row(m: Match) -> dict:
@@ -562,7 +580,6 @@ def build_training_matrix(db: Session, sport_key: str) -> pd.DataFrame:
             "home_score": m.home_score or 0, "away_score": m.away_score or 0,
             "result": m.result,
         }
-        # Parse shots / cards / referee from extra_data JSON
         ex = _parse_extra(m.extra_data)
         row["home_shots"]  = ex.get("hs",  None)
         row["away_shots"]  = ex.get("as_", None)
@@ -573,37 +590,69 @@ def build_training_matrix(db: Session, sport_key: str) -> pd.DataFrame:
         row["home_red"]    = ex.get("hr",  None)
         row["away_red"]    = ex.get("ar",  None)
         row["referee"]     = ex.get("ref", None)
-        # Real xG from API-Football backfill (present after job_resolve_matches)
         row["home_xg"]     = ex.get("home_xg", None)
         row["away_xg"]     = ex.get("away_xg", None)
         return row
 
-    df = pd.DataFrame([_match_row(m) for m in matches])
+    # Full context dataframe (all history) — used for feature computation only
+    df = pd.DataFrame([_match_row(m) for m in all_matches])
 
     now = datetime.utcnow()
+    training_cutoff = now - timedelta(days=training_years * 365)
+
+    # Only build training rows for matches within the training window
+    training_matches = [
+        m for m in all_matches[20:]   # skip first 20 (not enough form history)
+        if m.match_date >= training_cutoff
+    ]
+
+    logger.info(
+        f"[Training] {sport_key}: {len(all_matches)} total matches in DB, "
+        f"{len(training_matches)} in training window (last {training_years} years)"
+    )
+
     rows = []
-    for m in matches[20:]:   # skip first 20 (not enough form data)
+    for m in training_matches:
         try:
+            hs = m.home_score or 0
+            as_ = m.away_score or 0
+
             row = build_row(db, m, df, has_draw)
             row["result"] = m.result
-            row["over25"] = int((m.home_score or 0) + (m.away_score or 0) > 2.5)
-            row["btts"] = int((m.home_score or 0) > 0 and (m.away_score or 0) > 0)
 
-            # Recency weight: recent matches matter more than old ones
+            # ── Additional training labels ──────────────────────────────
+            row["over15"]          = int(hs + as_ > 1.5)
+            row["over25"]          = int(hs + as_ > 2.5)
+            row["over35"]          = int(hs + as_ > 3.5)
+            row["btts"]            = int(hs > 0 and as_ > 0)
+            row["home_cs"]         = int(as_ == 0)   # home team clean sheet
+            row["away_cs"]         = int(hs == 0)    # away team clean sheet
+
+            # ── Recency weights (within training window) ────────────────
             age_days = (now - m.match_date).days
-            if age_days <= 180:
-                row["sample_weight"] = 3.0   # last 6 months — highest weight
+            if age_days <= 90:
+                row["sample_weight"] = 4.0   # last 3 months — highest trust
+            elif age_days <= 180:
+                row["sample_weight"] = 3.0   # last 6 months
             elif age_days <= 365:
                 row["sample_weight"] = 2.0   # last year
-            elif age_days <= 730:
-                row["sample_weight"] = 1.5   # last 2 years
             else:
-                row["sample_weight"] = 1.0   # historical baseline
+                row["sample_weight"] = 1.5   # older within 2-year window
 
             rows.append(row)
         except Exception:
             pass
-    return pd.DataFrame(rows).dropna()
+
+    df_train = pd.DataFrame(rows).dropna()
+
+    # ── Time-based train/val split marker ─────────────────────────────────────
+    # The SportModel will use this to split chronologically (not randomly)
+    # Validation set = most recent 20% of matches
+    if len(df_train) > 0 and "match_date" not in df_train.columns:
+        pass  # match_date not preserved through build_row — use index ordering
+    # We preserve ordering (matches are sorted by date) so SportModel can split by index
+
+    return df_train
 
 
 def build_inference_row(db: Session, match: Match, sport_key: str) -> pd.DataFrame:

@@ -1120,6 +1120,50 @@ async def get_player_news(
     }
 
 
+@players_router.get("/top-stats")
+async def get_top_player_stats(
+    league_key: str = Query(..., description="nba or nfl"),
+    season: int = Query(None, description="Season year, e.g. 2024"),
+):
+    """
+    Return cached top-player stats for NBA or NFL.
+    Stats are fetched from ESPN once per day by the scheduler and stored in DB.
+    Falls back to fetching live if cache is empty.
+    """
+    import json
+    from datetime import datetime as _dt
+    from data.database import get_sync_session
+    from data.db_models.models import PlayerStatsCache
+
+    if season is None:
+        season = _dt.utcnow().year
+
+    # Try current season, then previous season (for off-season periods)
+    for s in [season, season - 1]:
+        with get_sync_session() as db:
+            row = (
+                db.query(PlayerStatsCache)
+                .filter_by(league_key=league_key, season=s)
+                .first()
+            )
+            if row and row.categories_json:
+                cats = json.loads(row.categories_json)
+                if cats:
+                    return {"league_key": league_key, "season": s, "categories": cats}
+
+    # Cache miss — fetch live and store
+    from data.loaders.player_stats import fetch_league_leaders, _upsert_cache
+    cats = fetch_league_leaders(league_key, season)
+    if not cats:
+        cats = fetch_league_leaders(league_key, season - 1)
+        if cats:
+            season = season - 1
+    if cats:
+        with get_sync_session() as db:
+            _upsert_cache(db, league_key, season, cats)
+    return {"league_key": league_key, "season": season, "categories": cats}
+
+
 @players_router.get("/soccer/search")
 async def search_players(q: str = Query(..., min_length=2)):
     """Search for a player by name — ESPN athlete search. Used for smart interlinking."""

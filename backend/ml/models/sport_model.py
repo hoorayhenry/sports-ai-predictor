@@ -33,7 +33,7 @@ from features.engineering import COMMON_FEATURES
 MODEL_DIR = Path(__file__).parent.parent / "saved"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-MARKETS = ["result", "over25", "btts"]
+MARKETS = ["result", "over15", "over25", "over35", "btts", "home_cs", "away_cs"]
 
 
 class SportModel:
@@ -53,20 +53,32 @@ class SportModel:
     # Training
     # ------------------------------------------------------------------
     def train(self, df: pd.DataFrame) -> dict[str, float]:
-        """Train all markets. Returns dict of market -> log_loss scores."""
+        """
+        Train all markets. Returns dict of market -> log_loss scores.
+
+        Uses a TIME-BASED split (not random): the model trains on the older 80%
+        of matches and validates on the most recent 20%.  This prevents data
+        leakage — future matches must never teach the model about the past.
+        """
         scores = {}
         X = df[self.features].astype(float)
 
-        # Recency weights: optional column from build_training_matrix
+        # Recency weights from build_training_matrix
         has_weights = "sample_weight" in df.columns
         weights_all = df["sample_weight"].values if has_weights else None
+
+        # ── Time-based split ────────────────────────────────────────────
+        # df is ordered oldest → newest (guaranteed by build_training_matrix
+        # which pulls from the DB ordered by match_date).
+        # Train on the first 80%, validate on the last 20%.
+        split_idx = int(len(df) * 0.8)
 
         for market in MARKETS:
             if market not in df.columns:
                 continue
             y_raw = df[market].dropna()
-            X_m = X.loc[y_raw.index]
-            w_m = weights_all[y_raw.index] if has_weights else None
+            X_m   = X.loc[y_raw.index]
+            w_m   = weights_all[y_raw.index] if has_weights else None
 
             if len(y_raw) < 50:
                 logger.warning(f"[{self.sport_key}] {market}: only {len(y_raw)} samples — skipping")
@@ -79,32 +91,40 @@ class SportModel:
             else:
                 y = y_raw.astype(int).values
 
-            if w_m is not None:
-                X_tr, X_val, y_tr, y_val, w_tr, w_val = train_test_split(
-                    X_m, y, w_m, test_size=0.2, random_state=42,
-                    stratify=y if len(np.unique(y)) > 1 else None,
-                )
-            else:
-                X_tr, X_val, y_tr, y_val = train_test_split(
-                    X_m, y, test_size=0.2, random_state=42,
-                    stratify=y if len(np.unique(y)) > 1 else None,
-                )
-                w_tr = None
+            # Time-based split on the (possibly filtered) index
+            # Positions within y_raw.index relative to the global split_idx
+            mask_train = y_raw.index < split_idx
+            mask_val   = y_raw.index >= split_idx
+
+            # Fallback to last 20% by position if index gap too small
+            if mask_val.sum() < 10:
+                n_val  = max(10, int(len(y) * 0.2))
+                mask_train = np.ones(len(y), dtype=bool)
+                mask_train[-n_val:] = False
+                mask_val   = ~mask_train
+
+            X_tr  = X_m.values[mask_train]
+            X_val = X_m.values[mask_val]
+            y_tr  = y[mask_train]
+            y_val = y[mask_val]
+            w_tr  = w_m[mask_train] if w_m is not None else None
+
+            if len(np.unique(y_tr)) < 2:
+                logger.warning(f"[{self.sport_key}] {market}: only one class in train set — skipping")
+                continue
 
             clf = self._build_classifier(market, len(np.unique(y)))
             clf.fit(X_tr, y_tr, sample_weight=w_tr)
 
             preds = clf.predict_proba(X_val)
-            ll = log_loss(y_val, preds)
+            ll  = log_loss(y_val, preds)
             acc = accuracy_score(y_val, clf.predict(X_val))
             scores[market] = ll
-            logger.info(f"[{self.sport_key}] {market}: log_loss={ll:.4f}  acc={acc:.3f}")
+            logger.info(f"[{self.sport_key}] {market}: log_loss={ll:.4f}  acc={acc:.3f}  "
+                        f"(train={len(y_tr)}, val={len(y_val)})")
             self.models[market] = clf
 
-            # ── Isotonic calibration per class ───────────────────────
-            # Fit one IsotonicRegression per output class so that
-            # predicted probabilities match empirical frequencies.
-            # This is critical for accurate edge detection vs market odds.
+            # ── Isotonic calibration per class ────────────────────────
             n_classes = preds.shape[1]
             cals = {}
             for ci in range(n_classes):
@@ -157,34 +177,52 @@ class SportModel:
     # ------------------------------------------------------------------
     def predict(self, X: pd.DataFrame) -> dict:
         """
-        Returns dict with probabilities for each market.
-        result: {"home": p, "draw": p, "away": p}  (or no draw for no-draw sports)
-        over25: {"over": p, "under": p}
-        btts:   {"yes": p, "no": p}
+        Returns dict with probabilities for each trained market.
+
+        Trained markets:
+          result:   {"H": p, "D": p, "A": p}
+          over15:   {"over": p, "under": p}
+          over25:   {"over": p, "under": p}
+          over35:   {"over": p, "under": p}
+          btts:     {"yes": p, "no": p}
+          home_cs:  {"yes": p, "no": p}  (home team clean sheet)
+          away_cs:  {"yes": p, "no": p}  (away team clean sheet)
         """
         out = {}
         X_feat = X[self.features].astype(float)
 
         # --- result ---
         if "result" in self.models:
-            clf = self.models["result"]
-            le = self.encoders.get("result")
-            proba = clf.predict_proba(X_feat)[0]
-            proba = self._calibrate("result", proba)
-            classes = le.classes_ if le else ["home", "away"]
+            clf    = self.models["result"]
+            le     = self.encoders.get("result")
+            proba  = clf.predict_proba(X_feat)[0]
+            proba  = self._calibrate("result", proba)
+            classes = le.classes_ if le else ["H", "A"]
             out["result"] = {str(c): float(p) for c, p in zip(classes, proba)}
 
-        # --- over25 ---
-        if "over25" in self.models:
-            raw = self.models["over25"].predict_proba(X_feat)[0]
-            cal = self._calibrate("over25", raw)
-            out["over25"] = {"over": cal[1], "under": cal[0]}
+        # --- binary goal markets ---
+        for mkt, label in [("over15", "over"), ("over25", "over"), ("over35", "over")]:
+            if mkt in self.models:
+                raw = self.models[mkt].predict_proba(X_feat)[0]
+                cal = self._calibrate(mkt, raw)
+                out[mkt] = {"over": cal[1], "under": cal[0]}
 
         # --- btts ---
         if "btts" in self.models:
             raw = self.models["btts"].predict_proba(X_feat)[0]
             cal = self._calibrate("btts", raw)
             out["btts"] = {"yes": cal[1], "no": cal[0]}
+
+        # --- clean sheets ---
+        if "home_cs" in self.models:
+            raw = self.models["home_cs"].predict_proba(X_feat)[0]
+            cal = self._calibrate("home_cs", raw)
+            out["home_cs"] = {"yes": cal[1], "no": cal[0]}
+
+        if "away_cs" in self.models:
+            raw = self.models["away_cs"].predict_proba(X_feat)[0]
+            cal = self._calibrate("away_cs", raw)
+            out["away_cs"] = {"yes": cal[1], "no": cal[0]}
 
         return out
 

@@ -93,9 +93,10 @@ async def predict_all_upcoming(
 async def value_bets(
     sport: Optional[str] = Query(None),
     min_ev: float = Query(0.04),
+    limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_async_session),
 ):
-    """Return all scheduled matches with positive EV bets."""
+    """Return scheduled matches with positive EV bets."""
     q = (
         select(Match)
         .options(
@@ -113,6 +114,7 @@ async def value_bets(
             Prediction.expected_value >= min_ev,
         )
         .order_by(Prediction.expected_value.desc())
+        .limit(limit)
     )
     if sport:
         q = q.where(Sport.key == sport)

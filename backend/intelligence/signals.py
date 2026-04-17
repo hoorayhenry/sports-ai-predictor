@@ -142,16 +142,24 @@ def get_match_intelligence_summary(db: Session, match_id: int) -> dict:
 
 # ── Main runner ───────────────────────────────────────────────────────
 
-def run_intelligence_for_upcoming(db: Session, api_key: str, hours_ahead: int = 48) -> int:
+def run_intelligence_for_upcoming(
+    db: Session,
+    api_key: str,
+    hours_ahead: int = 48,
+    max_matches: int = 15,
+    max_runtime_seconds: int = 300,
+) -> int:
     """
-    Scrape + extract intelligence for all upcoming matches in the next N hours.
-    Skips matches that already have signals from the last 6 hours.
-    Returns total new signals saved.
+    Scrape + extract intelligence for upcoming matches.
+    Caps at max_matches per run and enforces a wall-clock timeout so the
+    scheduler job can never block the event loop for more than max_runtime_seconds.
     """
+    import time as _time
     if not api_key:
-        logger.warning("[Intelligence] ANTHROPIC_API_KEY not set — skipping")
+        logger.warning("[Intelligence] GEMINI_API_KEY not set — skipping")
         return 0
 
+    job_start = _time.monotonic()
     cutoff = datetime.utcnow() + timedelta(hours=hours_ahead)
     recent  = datetime.utcnow() - timedelta(hours=6)
 
@@ -180,13 +188,16 @@ def run_intelligence_for_upcoming(db: Session, api_key: str, hours_ahead: int = 
         .all()
     )
 
-    to_process = [m for m in matches if m.id not in already_processed]
-    logger.info(f"[Intelligence] Processing {len(to_process)}/{len(matches)} matches (others have fresh signals)")
+    to_process = [m for m in matches if m.id not in already_processed][:max_matches]
+    logger.info(f"[Intelligence] Processing {len(to_process)}/{len(matches)} matches (capped at {max_matches}, others have fresh signals)")
 
     total_saved = 0
 
     with IntelligenceScraper() as scraper:
         for match in to_process:
+            if (_time.monotonic() - job_start) > max_runtime_seconds:
+                logger.warning(f"[Intelligence] Hit {max_runtime_seconds}s wall-clock limit — stopping early")
+                break
             home_name = match.home.name if match.home else ""
             away_name = match.away.name if match.away else ""
             home_id   = match.home_id
