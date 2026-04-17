@@ -14,6 +14,11 @@ The adaptive scheduler runs this every 60s during live matches, 5 min otherwise.
 from __future__ import annotations
 import httpx
 import concurrent.futures
+try:
+    from curl_cffi import requests as _cffi_requests
+    _CFFI_AVAILABLE = True
+except ImportError:
+    _CFFI_AVAILABLE = False
 from datetime import datetime, date, timedelta
 from loguru import logger
 
@@ -168,13 +173,22 @@ def _parse_sofascore_event(e: dict, sport_key: str) -> dict:
 
 
 def _fetch_sofascore_sport(ss_slug: str, sport_key: str, timeout: int = 10) -> list[dict]:
-    """Fetch all live events for one sport from Sofascore."""
+    """
+    Fetch all live events for one sport from Sofascore.
+    Uses curl_cffi (Chrome TLS fingerprint) to bypass Sofascore's bot detection.
+    Falls back to httpx if curl_cffi is unavailable.
+    """
     try:
-        resp = httpx.get(
-            f"{_SS_BASE}/sport/{ss_slug}/events/live",
-            headers=_SS_HEADERS,
-            timeout=timeout,
-        )
+        url = f"{_SS_BASE}/sport/{ss_slug}/events/live"
+        if _CFFI_AVAILABLE:
+            resp = _cffi_requests.get(
+                url,
+                impersonate="chrome124",
+                headers={"Referer": "https://www.sofascore.com/", "Accept": "application/json"},
+                timeout=timeout,
+            )
+        else:
+            resp = httpx.get(url, headers=_SS_HEADERS, timeout=timeout)
         if resp.status_code != 200:
             return []
         events = resp.json().get("events", [])
@@ -416,6 +430,61 @@ def _expire_stale_live_matches(db, active_external_ids: set) -> int:
     return expired
 
 
+# ── Shared live cache ─────────────────────────────────────────────────────────
+#
+# The scheduler populates this every 30 s. Both /matches/live/scores and the SSE
+# stream read from here so the navbar count and Live page always agree.
+
+import time as _time
+
+_LIVE_CACHE: list[dict] = []
+_LIVE_CACHE_TS: float   = 0.0
+
+_SPORT_ICONS: dict[str, str] = {
+    "football":          "⚽",
+    "basketball":        "🏀",
+    "tennis":            "🎾",
+    "baseball":          "⚾",
+    "american_football": "🏈",
+    "ice_hockey":        "🏒",
+    "cricket":           "🏏",
+    "rugby":             "🏉",
+    "handball":          "🤾",
+    "volleyball":        "🏐",
+}
+
+
+def get_cached_live_fixtures() -> list[dict]:
+    """
+    Return the most recent live fixtures fetched by the scheduler.
+    Falls back to a direct Sofascore fetch if cache is older than 90 s or empty.
+    """
+    global _LIVE_CACHE, _LIVE_CACHE_TS
+    age = _time.time() - _LIVE_CACHE_TS
+    if _LIVE_CACHE and age < 90:
+        return list(_LIVE_CACHE)
+    # Cache is cold or stale — do a fresh fetch
+    try:
+        fresh = fetch_live_fixtures_sofascore()
+        if fresh:
+            _LIVE_CACHE    = fresh
+            _LIVE_CACHE_TS = _time.time()
+            return list(_LIVE_CACHE)
+    except Exception:
+        pass
+    return list(_LIVE_CACHE)  # return stale rather than nothing
+
+
+def _enrich_fixture(f: dict) -> dict:
+    """Add sport_icon and normalise competition field for frontend consumption."""
+    sk = f.get("sport_key", "football")
+    return {
+        **f,
+        "sport_icon":  _SPORT_ICONS.get(sk, "🏆"),
+        "competition": f.get("competition") or f.get("league_name", ""),
+    }
+
+
 # ── Main update function ───────────────────────────────────────────────────────
 
 def update_live_scores(db, api_key: str = "") -> int:
@@ -439,6 +508,13 @@ def update_live_scores(db, api_key: str = "") -> int:
     if not fixtures and api_key:
         logger.info("ESPN also empty — last resort: API-Football")
         fixtures = fetch_live_fixtures_api_football(api_key)
+
+    # ── Populate the shared live cache ─────────────────────────────────
+    # Always update even if fixtures is empty — an empty list means nothing
+    # is live right now, which is valid information.
+    global _LIVE_CACHE, _LIVE_CACHE_TS
+    _LIVE_CACHE    = [_enrich_fixture(f) for f in fixtures if f.get("status") == "live"]
+    _LIVE_CACHE_TS = _time.time()
 
     # Always clean stale 'live' rows even if no live data right now
     active_ids = {f.get("external_id", "") for f in fixtures}

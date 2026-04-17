@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { Sport, Competition, Match, ValueBet, MatchDecision, SmartSet, PerformanceStats, PredictionHistory } from "./types";
+import type { Sport, Competition, Match, ValueBet, MatchDecision, DailyPicksResponse, SmartSet, PerformanceStats, PredictionHistory } from "./types";
 
 const BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000/api/v1";
 
@@ -47,7 +47,7 @@ export const fetchPredictionStats = () =>
 
 // Decision engine
 export const fetchDailyPicks = (sport?: string, days = 7) =>
-  api.get<MatchDecision[]>("/decisions/daily-picks", { params: { ...(sport ? { sport } : {}), days } }).then((r) => r.data);
+  api.get<DailyPicksResponse>("/decisions/daily-picks", { params: { ...(sport ? { sport } : {}), days, limit: 50 } }).then((r) => r.data);
 
 export const fetchAllDecisions = (params?: {
   sport?: string; decision?: string; prob_tag?: string; days?: number;

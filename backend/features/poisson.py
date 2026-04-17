@@ -203,47 +203,133 @@ class DixonColes:
         if total > 0:
             score_matrix /= total
 
-        # Outcome probabilities
-        home_win = float(np.tril(score_matrix, -1).sum())
-        draw     = float(np.trace(score_matrix))
-        away_win = float(np.triu(score_matrix, 1).sum())
+        sm = score_matrix  # alias for readability
 
-        # BTTS: both teams score at least once
-        btts_yes = float(score_matrix[1:, 1:].sum())
+        # ── 1X2 ──────────────────────────────────────────────────────────
+        home_win = float(np.tril(sm, -1).sum())
+        draw     = float(np.trace(sm))
+        away_win = float(np.triu(sm, 1).sum())
 
-        # Over goals lines
-        over_2_5 = float(sum(
-            score_matrix[h, a]
+        # ── BTTS ─────────────────────────────────────────────────────────
+        btts_yes = float(sm[1:, 1:].sum())
+        btts_no  = 1.0 - btts_yes
+
+        # ── Over/Under goal lines ─────────────────────────────────────────
+        def _over(line: float) -> float:
+            return float(sum(
+                sm[h, a]
+                for h in range(MAX_GOALS + 1)
+                for a in range(MAX_GOALS + 1)
+                if h + a > line
+            ))
+
+        over_0_5 = _over(0)
+        over_1_5 = _over(1)
+        over_2_5 = _over(2)
+        over_3_5 = _over(3)
+        over_4_5 = _over(4)
+
+        # ── Double Chance ─────────────────────────────────────────────────
+        dc_1x = home_win + draw   # home or draw
+        dc_x2 = draw + away_win   # draw or away
+        dc_12 = home_win + away_win  # home or away (no draw)
+
+        # ── Draw No Bet ───────────────────────────────────────────────────
+        no_draw_total = home_win + away_win
+        dnb_home = home_win / no_draw_total if no_draw_total > 0 else 0.5
+        dnb_away = away_win / no_draw_total if no_draw_total > 0 else 0.5
+
+        # ── Asian Handicap -0.5 (home must win outright) ──────────────────
+        ah_home_neg05 = home_win
+        ah_away_neg05 = draw + away_win   # away covers if draw or away wins
+
+        # ── Asian Handicap +0.5 (away must win outright) ──────────────────
+        ah_home_pos05 = home_win + draw
+        ah_away_pos05 = away_win
+
+        # ── Asian Handicap -1 (home wins by 2+; push on win by 1) ────────
+        ah_home_neg1  = float(sum(sm[h, a] for h in range(MAX_GOALS+1) for a in range(MAX_GOALS+1) if h - a >= 2))
+        ah_push_neg1  = float(sum(sm[h, a] for h in range(MAX_GOALS+1) for a in range(MAX_GOALS+1) if h - a == 1))
+        ah_away_neg1  = float(sum(sm[h, a] for h in range(MAX_GOALS+1) for a in range(MAX_GOALS+1) if h - a <= 0))
+
+        # ── Asian Handicap +1 (away wins by 2+; push on away win by 1) ───
+        ah_away_pos1  = float(sum(sm[h, a] for h in range(MAX_GOALS+1) for a in range(MAX_GOALS+1) if a - h >= 2))
+        ah_push_pos1  = float(sum(sm[h, a] for h in range(MAX_GOALS+1) for a in range(MAX_GOALS+1) if a - h == 1))
+        ah_home_pos1  = float(sum(sm[h, a] for h in range(MAX_GOALS+1) for a in range(MAX_GOALS+1) if h - a >= 0))
+
+        # ── Clean sheets ──────────────────────────────────────────────────
+        home_cs = float(sm[:, 0].sum())   # home keeps clean sheet (away scores 0)
+        away_cs = float(sm[0, :].sum())   # away keeps clean sheet (home scores 0)
+
+        # ── Win to Nil ────────────────────────────────────────────────────
+        home_wtn = float(sum(sm[h, 0] for h in range(1, MAX_GOALS + 1)))   # home wins AND away 0
+        away_wtn = float(sum(sm[0, a] for a in range(1, MAX_GOALS + 1)))   # away wins AND home 0
+
+        # ── BTTS + Result combos ──────────────────────────────────────────
+        btts_home = float(sum(sm[h, a] for h in range(1, MAX_GOALS+1) for a in range(1, MAX_GOALS+1) if h > a))
+        btts_draw = float(sum(sm[h, h] for h in range(1, MAX_GOALS+1)))
+        btts_away = float(sum(sm[h, a] for h in range(1, MAX_GOALS+1) for a in range(1, MAX_GOALS+1) if a > h))
+
+        # ── Top correct scores (top 8 by probability) ─────────────────────
+        score_probs = [
+            {"home": h, "away": a, "prob": round(float(sm[h, a]), 5)}
             for h in range(MAX_GOALS + 1)
             for a in range(MAX_GOALS + 1)
-            if h + a > 2
-        ))
-        over_1_5 = float(sum(
-            score_matrix[h, a]
-            for h in range(MAX_GOALS + 1)
-            for a in range(MAX_GOALS + 1)
-            if h + a > 1
-        ))
-        over_3_5 = float(sum(
-            score_matrix[h, a]
-            for h in range(MAX_GOALS + 1)
-            for a in range(MAX_GOALS + 1)
-            if h + a > 3
-        ))
+        ]
+        top_scores = sorted(score_probs, key=lambda x: x["prob"], reverse=True)[:8]
 
         return {
+            # ── 1X2 ──
             "home_win":  home_win,
             "draw":      draw,
             "away_win":  away_win,
-            "btts_yes":  btts_yes,
-            "btts_no":   1.0 - btts_yes,
+            # ── Double Chance ──
+            "double_chance_1x": dc_1x,
+            "double_chance_x2": dc_x2,
+            "double_chance_12": dc_12,
+            # ── Draw No Bet ──
+            "dnb_home": dnb_home,
+            "dnb_away": dnb_away,
+            # ── Asian Handicap ──
+            "ah_home_-0.5": ah_home_neg05,
+            "ah_away_-0.5": ah_away_neg05,
+            "ah_home_+0.5": ah_home_pos05,
+            "ah_away_+0.5": ah_away_pos05,
+            "ah_home_-1.0": ah_home_neg1,
+            "ah_push_-1.0": ah_push_neg1,
+            "ah_away_-1.0": ah_away_neg1,
+            "ah_home_+1.0": ah_home_pos1,
+            "ah_push_+1.0": ah_push_pos1,
+            "ah_away_+1.0": ah_away_pos1,
+            # ── Over/Under ──
+            "over_0.5":  over_0_5,
+            "under_0.5": 1.0 - over_0_5,
             "over_1.5":  over_1_5,
+            "under_1.5": 1.0 - over_1_5,
             "over_2.5":  over_2_5,
-            "over_3.5":  over_3_5,
             "under_2.5": 1.0 - over_2_5,
+            "over_3.5":  over_3_5,
+            "under_3.5": 1.0 - over_3_5,
+            "over_4.5":  over_4_5,
+            "under_4.5": 1.0 - over_4_5,
+            # ── BTTS ──
+            "btts_yes": btts_yes,
+            "btts_no":  btts_no,
+            # ── BTTS + Result ──
+            "btts_home_win": btts_home,
+            "btts_draw":     btts_draw,
+            "btts_away_win": btts_away,
+            # ── Clean Sheets / Win to Nil ──
+            "home_clean_sheet": home_cs,
+            "away_clean_sheet": away_cs,
+            "home_win_to_nil":  home_wtn,
+            "away_win_to_nil":  away_wtn,
+            # ── Correct Score ──
+            "top_correct_scores": top_scores,
+            # ── Expected goals ──
             "exp_home_goals": mu_h,
             "exp_away_goals": mu_a,
-            "score_matrix": score_matrix.tolist(),   # full 11×11 grid
+            "score_matrix": sm.tolist(),
         }
 
     def is_fitted(self) -> bool:

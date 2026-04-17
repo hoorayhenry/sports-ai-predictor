@@ -10,6 +10,7 @@ import MatchDetailPage from "./pages/MatchDetailPage";
 import NewsPage from "./pages/NewsPage";
 import AnalyticsPage from "./pages/AnalyticsPage";
 import StandingsPage from "./pages/StandingsPage";
+import SportsPage from "./pages/SportsPage";
 import LivePage from "./pages/LivePage";
 import TeamDetailPage from "./pages/TeamDetailPage";
 import PlayerDetailPage from "./pages/PlayerDetailPage";
@@ -46,6 +47,7 @@ export default function App() {
           <Route path="/analytics"   element={<AnalyticsPage />} />
           <Route path="/performance" element={<PerformancePage />} />
           <Route path="/history"     element={<HistoryPage />} />
+          <Route path="/sports"      element={<SportsPage />} />
           <Route path="/tables"      element={<StandingsPage />} />
           <Route path="/live"                              element={<LivePage />} />
           <Route path="/match/:id"                         element={<MatchDetailPage />} />

@@ -210,6 +210,7 @@ app.include_router(standings_router, prefix="/api/v1")
 app.include_router(teams_router,    prefix="/api/v1")
 app.include_router(players_router,  prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
+app.include_router(sports_data_router, prefix="/api/v1")
 
 
 @app.get("/api/v1/health")

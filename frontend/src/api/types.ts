@@ -20,6 +20,44 @@ export interface Odds {
   point?: number;
 }
 
+export interface PredictionValueBet {
+  market: string;
+  outcome: string;
+  prob: number;
+  odds: number;
+  ev: number;
+  kelly: number;
+  confidence: "high" | "medium" | "low";
+}
+
+export interface PredictionMarkets {
+  result?: Record<string, number>;
+  over15?: { over: number; under: number };
+  over25?: { over: number; under: number };
+  over35?: { over: number; under: number };
+  btts?: { yes: number; no: number };
+  home_cs?: { yes: number; no: number };
+  away_cs?: { yes: number; no: number };
+  // Poisson-derived scalars
+  double_chance_1x?: number;
+  double_chance_x2?: number;
+  double_chance_12?: number;
+  dnb_home?: number;
+  dnb_away?: number;
+  home_clean_sheet?: number;
+  away_clean_sheet?: number;
+  home_win_to_nil?: number;
+  away_win_to_nil?: number;
+  btts_home_win?: number;
+  btts_draw?: number;
+  btts_away_win?: number;
+  exp_home_goals?: number;
+  exp_away_goals?: number;
+  top_correct_scores?: Array<{ score: string; prob: number }>;
+  value_bets?: PredictionValueBet[];
+  [key: string]: unknown; // allows AH keys with dots like "ah_home_-0.5"
+}
+
 export interface Prediction {
   predicted_result: string | null;
   home_win_prob: number | null;
@@ -34,6 +72,7 @@ export interface Prediction {
   expected_value: number | null;
   kelly_stake: number | null;
   confidence: "high" | "medium" | "low" | null;
+  markets: PredictionMarkets | null;
 }
 
 export interface IntelligenceSignal {
@@ -99,6 +138,17 @@ export interface MatchDecision {
     form: number;
     consistency: number;
   };
+  // SKIP reason (null on PLAY)
+  skip_reason: string | null;
+  // Value intelligence
+  market_prob: number | null;
+  market_prob_pct: number | null;
+  model_prob_pct: number | null;
+  edge: number | null;
+  edge_pct: number | null;
+  value_label: "strong_value" | "fair_value" | "no_value" | "no_odds" | null;
+  // Closing Line Value
+  clv: number | null;
   // Probabilities
   home_win_prob: number | null;
   draw_prob: number | null;
@@ -107,6 +157,15 @@ export interface MatchDecision {
   btts_prob: number | null;
   is_value_bet: boolean;
   expected_value: number | null;
+  markets: PredictionMarkets | null;
+}
+
+export interface DailyPicksResponse {
+  picks: MatchDecision[];
+  total_analysed: number;
+  total_plays: number;
+  total_skipped: number;
+  selection_rate: number;
 }
 
 export interface SmartSetMatch {
