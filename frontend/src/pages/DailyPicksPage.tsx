@@ -8,7 +8,6 @@ import {
 import { fetchDailyPicks, fetchSports, triggerDecisionsNow } from "../api/client";
 import SportTabs from "../components/SportTabs";
 import Spinner from "../components/Spinner";
-import { formatDate } from "../utils/format";
 import { Link } from "react-router-dom";
 import type { MatchDecision } from "../api/types";
 
@@ -185,9 +184,7 @@ function SignalCard({ pick }: { pick: MatchDecision }) {
   const vCfg    = valueLabelConfig(pick.value_label);
   const { color: cColor } = confConfig(conf);
 
-  const hasEdge   = pick.model_prob_pct != null && pick.market_prob_pct != null;
-  const edgePct   = pick.edge_pct;
-  const eColor    = edgeColor(edgePct);
+  const hasEdge = pick.model_prob_pct != null && pick.market_prob_pct != null;
 
   // Accent glow based on value label
   const accentBorder =
