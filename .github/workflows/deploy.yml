@@ -86,6 +86,11 @@ jobs:
           script: |
             set -e
 
+            # ── Ensure git is installed ─────────────────────────────
+            if ! command -v git &>/dev/null; then
+              sudo apt-get update -qq && sudo apt-get install -y git
+            fi
+
             IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
             ECR_REGISTRY="594474085976.dkr.ecr.us-east-2.amazonaws.com"
             REPO_URL="https://${{ secrets.GIT_TOKEN }}@github.com/${{ github.repository }}.git"
