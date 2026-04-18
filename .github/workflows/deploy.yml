@@ -111,6 +111,30 @@ jobs:
             # ── Pull new images ─────────────────────────────────────
             IMAGE_TAG="$IMAGE_TAG" docker compose -f docker-compose.prod.yml pull
 
+            # ── Bootstrap Let's Encrypt (first deploy only) ─────────
+            if ! docker run --rm \
+                -v sports-ai_certbot_certs:/etc/letsencrypt busybox \
+                test -f /etc/letsencrypt/live/sportyintel.com/fullchain.pem \
+                2>/dev/null; then
+              echo "First deploy — creating temporary cert so nginx can start..."
+              docker run --rm \
+                -v sports-ai_certbot_certs:/etc/letsencrypt alpine sh -c \
+                "apk add -q openssl && \
+                 mkdir -p /etc/letsencrypt/live/sportyintel.com && \
+                 openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
+                   -keyout /etc/letsencrypt/live/sportyintel.com/privkey.pem \
+                   -out /etc/letsencrypt/live/sportyintel.com/fullchain.pem \
+                   -subj '/CN=sportyintel.com' 2>/dev/null"
+              IMAGE_TAG="$IMAGE_TAG" docker compose -f docker-compose.prod.yml up -d nginx
+              sleep 10
+              docker compose -f docker-compose.prod.yml run --rm certbot certonly \
+                --webroot -w /var/www/certbot \
+                -d sportyintel.com -d www.sportyintel.com \
+                --email omorojehenry@yahoo.com --agree-tos --no-eff-email
+              docker compose -f docker-compose.prod.yml exec nginx nginx -s reload
+              echo "SSL certificate issued successfully"
+            fi
+
             # ── Copy frontend static files into shared volume ───────
             docker run --rm \
               -v sports-ai_frontend_dist:/shared \
