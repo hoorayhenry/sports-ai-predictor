@@ -86,24 +86,19 @@ jobs:
           script: |
             set -e
 
-            # ── Ensure git is installed ─────────────────────────────
-            if ! command -v git &>/dev/null; then
-              sudo apt-get update -qq && sudo apt-get install -y git
-            fi
-
             IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
             ECR_REGISTRY="594474085976.dkr.ecr.us-east-2.amazonaws.com"
             REPO_URL="https://${{ secrets.GIT_TOKEN }}@github.com/${{ github.repository }}.git"
 
             # ── Clone or update repo ────────────────────────────────
-            if [ -d /opt/sports-ai/.git ]; then
-              git -C /opt/sports-ai remote set-url origin "$REPO_URL"
-              git -C /opt/sports-ai pull origin main
+            if [ -d $HOME/sports-ai/.git ]; then
+              git -C $HOME/sports-ai remote set-url origin "$REPO_URL"
+              git -C $HOME/sports-ai pull origin main
             else
-              git clone "$REPO_URL" /opt/sports-ai
+              git clone "$REPO_URL" $HOME/sports-ai
             fi
 
-            cd /opt/sports-ai
+            cd $HOME/sports-ai
 
             # ── ECR login ───────────────────────────────────────────
             AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" \
