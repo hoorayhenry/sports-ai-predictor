@@ -623,7 +623,6 @@ export default function NewsPage() {
   const [featured, ...rest] = allArticles;
   const total = data?.pages[0]?.total ?? 0;
   const latestArticles = latestData?.articles ?? [];
-  const drafts_pending = data?.pages[0]?.drafts_pending ?? 0;
 
   return (
     <div className="min-h-screen pb-24 md:pb-8">

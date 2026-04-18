@@ -93,11 +93,12 @@ export default function HomePage() {
     [hasNextPage, isFetchingNextPage, fetchNextPage]
   );
 
-  const { data: dailyPicks = [] } = useQuery({
+  const { data: picksData } = useQuery({
     queryKey: ["daily-picks-home"],
     queryFn: () => fetchDailyPicks(),
     staleTime: 60_000,
   });
+  const dailyPicks: MatchDecision[] = picksData?.picks ?? [];
 
   const { data: liveData } = useQuery({
     queryKey: ["live-scores"],

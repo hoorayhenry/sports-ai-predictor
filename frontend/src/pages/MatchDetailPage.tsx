@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Zap, TrendingUp, Target, Shield } from "lucide-react";
 import { fetchMatch } from "../api/client";
 import Spinner from "../components/Spinner";
-import { formatDate, outcomeLabel, confidenceColor, pct, resultLabel } from "../utils/format";
+import { formatDate, outcomeLabel, confidenceColor, resultLabel } from "../utils/format";
 import type { Odds, PredictionMarkets, PredictionValueBet } from "../api/types";
 
 // ─── helpers ────────────────────────────────────────────────────────────────

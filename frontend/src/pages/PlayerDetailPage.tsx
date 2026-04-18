@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ArrowLeft, User, Flag, BarChart2, Newspaper, Calendar, Ruler,
+  ArrowLeft, User, Flag, BarChart2, Newspaper,
 } from "lucide-react";
 import Spinner from "../components/Spinner";
 import { api } from "../api/client";
