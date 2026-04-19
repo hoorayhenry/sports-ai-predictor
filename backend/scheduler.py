@@ -104,18 +104,30 @@ def _get_smart_sets_dicts(db) -> list[dict]:
 # ── Individual job functions ──────────────────────────────────────────
 
 def job_run_predictions():
-    """Run ML predictions for all upcoming scheduled matches."""
+    """
+    Run ML predictions for all upcoming scheduled matches.
+
+    Batches by sport to avoid reloading the model and rebuilding the historical
+    context DataFrame for every single match (was O(N*M) DB queries; now O(S)
+    where S = number of sports with a trained model).
+    """
     logger.info("[SCHEDULER] Running predictions for upcoming matches...")
     try:
+        import pandas as pd
+        from collections import defaultdict
         from data.database import get_sync_session
         from data.db_models.models import Match, Competition, Sport
         from sqlalchemy.orm import joinedload
         from ml.models.sport_model import SportModel, MODEL_DIR
-        from features.engineering import build_inference_row
+        from features.engineering import (
+            build_row, COMMON_FEATURES, _build_team_index,
+            _parse_extra,
+        )
         from betting.value_engine import evaluate_match, save_predictions
 
         with get_sync_session() as db:
-            matches = (
+            # Load all upcoming matches grouped by sport
+            all_upcoming = (
                 db.query(Match)
                 .join(Competition).join(Sport)
                 .options(
@@ -126,24 +138,84 @@ def job_run_predictions():
                 .filter(Match.status == "scheduled")
                 .all()
             )
-            for m in matches:
+
+            # Group by sport key
+            by_sport: dict = defaultdict(list)
+            for m in all_upcoming:
+                sk = m.competition.sport.key if m.competition and m.competition.sport else None
+                if sk:
+                    by_sport[sk].append(m)
+
+            total_predicted = 0
+            for sk, sport_matches in by_sport.items():
+                model_path = MODEL_DIR / f"{sk}_model.pkl"
+                if not model_path.exists():
+                    continue
+
                 try:
-                    sk = m.competition.sport.key if m.competition and m.competition.sport else None
-                    if not sk:
-                        continue
-                    model_path = MODEL_DIR / f"{sk}_model.pkl"
-                    if not model_path.exists():
-                        continue
                     model = SportModel.load(sk)
-                    X     = build_inference_row(db, m, sk)
-                    if X.empty:
+                    sport = db.query(Sport).filter_by(key=sk).first()
+                    if not sport:
                         continue
-                    pred_probs = model.predict(X)
-                    vbs        = evaluate_match(db, m.id, pred_probs)
-                    save_predictions(db, m, pred_probs, vbs)
+
+                    # Load ALL finished matches for this sport ONCE
+                    hist_matches = (
+                        db.query(Match)
+                        .join(Competition)
+                        .filter(Competition.sport_id == sport.id, Match.result.isnot(None))
+                        .options(joinedload(Match.home), joinedload(Match.away))
+                        .order_by(Match.match_date)
+                        .all()
+                    )
+
+                    def _mrow(m: Match) -> dict:
+                        row = {
+                            "id": m.id, "home_id": m.home_id, "away_id": m.away_id,
+                            "match_date": pd.to_datetime(m.match_date),
+                            "home_score": m.home_score or 0,
+                            "away_score": m.away_score or 0,
+                            "result": m.result,
+                        }
+                        ex = _parse_extra(m.extra_data)
+                        for k, col in [("hs","home_shots"),("as_","away_shots"),
+                                       ("hst","home_sot"),("ast","away_sot"),
+                                       ("hy","home_yellow"),("ay","away_yellow"),
+                                       ("hr","home_red"),("ar","away_red"),
+                                       ("ref","referee"),
+                                       ("home_xg","home_xg"),("away_xg","away_xg")]:
+                            row[col] = ex.get(k)
+                        return row
+
+                    df = pd.DataFrame([_mrow(m) for m in hist_matches]) if hist_matches else pd.DataFrame()
+                    if df.empty:
+                        continue
+
+                    # Build team index once for this sport
+                    team_idx, h2h_idx = _build_team_index(df)
+                    import numpy as np
+                    lg_avg = float(df[df.result.notna()]["home_score"].mean() or 1.3)
+
+                    for m in sport_matches:
+                        try:
+                            row = build_row(db, m, df, sk,
+                                            team_idx=team_idx, h2h_idx=h2h_idx,
+                                            lg_avg=lg_avg)
+                            X = pd.DataFrame([row])[COMMON_FEATURES]
+                            if X.empty:
+                                continue
+                            pred_probs = model.predict(X)
+                            vbs        = evaluate_match(db, m.id, pred_probs)
+                            save_predictions(db, m, pred_probs, vbs)
+                            total_predicted += 1
+                        except Exception as e:
+                            logger.debug(f"Prediction error match {m.id} ({sk}): {e}")
+
+                    logger.info(f"[SCHEDULER] {sk}: predicted {len(sport_matches)} matches")
+
                 except Exception as e:
-                    logger.debug(f"Prediction job error match {m.id}: {e}")
-        logger.info("[SCHEDULER] Predictions complete")
+                    logger.error(f"[SCHEDULER] Prediction batch failed for {sk}: {e}")
+
+        logger.info(f"[SCHEDULER] Predictions complete — {total_predicted} matches updated")
     except Exception as e:
         logger.error(f"[SCHEDULER] Predictions job failed: {e}")
 
@@ -257,6 +329,48 @@ def job_ingest_multi_sport_history():
         )
     except Exception as e:
         logger.error(f"[SCHEDULER] Multi-sport ingest failed: {e}")
+
+
+def job_browser_ingest_sofascore():
+    """
+    Daily incremental ingestion for sports that Sofascore blocks via httpx.
+    Uses Playwright (headless Chrome) to bypass TLS fingerprint detection.
+
+    Sports: cricket, rugby, handball, volleyball, tennis
+    Fetches the last 3 days so any catch-up after downtime is handled.
+    Runs at 02:30 UTC, after the standard multi-sport ingest.
+    """
+    logger.info("[SCHEDULER] Starting browser-based Sofascore ingestion...")
+    try:
+        from data.database import get_sync_session
+        from data.loaders.sofascore_browser import browser_ingest_sport, SofascoreBrowserFetcher, BROWSER_ONLY_SPORTS
+        from data.loaders.multi_sport_ingest import SPORTS_CONFIG
+        from datetime import date, timedelta
+
+        # Fetch last 3 days (catches up if yesterday's job missed)
+        end   = date.today() - timedelta(days=1)
+        start = end - timedelta(days=2)
+
+        slug_map = {sk: slug for slug, sk, *_ in SPORTS_CONFIG}
+        results: dict[str, int] = {}
+
+        with SofascoreBrowserFetcher() as fetcher:
+            for sport_key in BROWSER_ONLY_SPORTS:
+                ss_slug = slug_map.get(sport_key)
+                if not ss_slug:
+                    continue
+                try:
+                    with get_sync_session() as db:
+                        n = browser_ingest_sport(db, ss_slug, sport_key, start, end, fetcher=fetcher)
+                    results[sport_key] = n
+                except Exception as e:
+                    logger.warning(f"[SCHEDULER] Browser ingest {sport_key} failed: {e}")
+                    results[sport_key] = 0
+
+        total = sum(results.values())
+        logger.info(f"[SCHEDULER] Browser ingest done: {total} new matches — {results}")
+    except Exception as e:
+        logger.error(f"[SCHEDULER] Browser ingest job failed: {e}")
 
 
 def job_retrain_models():
@@ -431,6 +545,68 @@ def job_retry_drafts():
         logger.info(f"[SCHEDULER] Draft retry: {promoted} articles promoted to published")
     except Exception as e:
         logger.error(f"[SCHEDULER] Draft retry job failed: {e}")
+
+
+def _job_generate_smart_sets_for_window(job_name: str, days_ahead_start: int, days_ahead_end: int):
+    """
+    Core helper: generate smart sets for a WAT-aligned match window.
+
+    WAT = UTC+1.  Window day boundaries are computed in WAT then converted to UTC.
+    'days_ahead_start' / 'days_ahead_end' are calendar days from *today in WAT*.
+
+    E.g. Sunday job fired at 17:00 WAT:
+      days_ahead_start=1 (Monday), days_ahead_end=3 (Wednesday)
+    """
+    logger.info(f"[SCHEDULER] Generating smart sets — {job_name}...")
+    try:
+        from data.database import get_sync_session
+        from betting.decision_engine import process_decisions, generate_smart_sets
+
+        # Compute window in WAT then convert to UTC
+        now_utc = datetime.utcnow()
+        now_wat_naive = now_utc + timedelta(hours=1)          # WAT = UTC+1 (no DST)
+
+        # Start of the target day in WAT (midnight)
+        start_wat = (now_wat_naive + timedelta(days=days_ahead_start)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        # End of the last target day in WAT (23:59:59)
+        end_wat = (now_wat_naive + timedelta(days=days_ahead_end)).replace(
+            hour=23, minute=59, second=59, microsecond=0
+        )
+        # Convert back to UTC
+        window_start_utc = start_wat - timedelta(hours=1)
+        window_end_utc   = end_wat   - timedelta(hours=1)
+
+        logger.info(
+            f"[SCHEDULER] {job_name} window: "
+            f"{window_start_utc.strftime('%a %b %d %H:%M')} – "
+            f"{window_end_utc.strftime('%a %b %d %H:%M')} UTC"
+        )
+
+        with get_sync_session() as db:
+            # Re-run decisions so any new fixtures in this window are evaluated
+            process_decisions(db)
+            sets = generate_smart_sets(db, window_start_utc, window_end_utc)
+
+        logger.info(f"[SCHEDULER] {job_name}: {len(sets)} sets generated")
+    except Exception as e:
+        logger.error(f"[SCHEDULER] {job_name} failed: {e}")
+
+
+def job_smart_sets_mon_wed():
+    """Sunday 16:00 UTC (17:00 WAT) → picks for Monday–Wednesday."""
+    _job_generate_smart_sets_for_window("Mon–Wed picks", days_ahead_start=1, days_ahead_end=3)
+
+
+def job_smart_sets_thu_fri():
+    """Wednesday 16:00 UTC (17:00 WAT) → picks for Thursday–Friday."""
+    _job_generate_smart_sets_for_window("Thu–Fri picks", days_ahead_start=1, days_ahead_end=2)
+
+
+def job_smart_sets_sat_sun():
+    """Friday 16:00 UTC (17:00 WAT) → picks for Saturday–Sunday."""
+    _job_generate_smart_sets_for_window("Sat–Sun picks", days_ahead_start=1, days_ahead_end=2)
 
 
 def job_history_backfill():
@@ -648,6 +824,29 @@ def start_scheduler():
         replace_existing=True,
     )
 
+    # ── Rolling smart set windows (17:00 WAT = 16:00 UTC) ──────────────────
+    # Sunday  → Mon–Wed picks
+    _scheduler.add_job(
+        job_smart_sets_mon_wed,
+        CronTrigger(day_of_week="sun", hour=16, minute=0),
+        id="smart_sets_mon_wed",
+        replace_existing=True,
+    )
+    # Wednesday → Thu–Fri picks
+    _scheduler.add_job(
+        job_smart_sets_thu_fri,
+        CronTrigger(day_of_week="wed", hour=16, minute=0),
+        id="smart_sets_thu_fri",
+        replace_existing=True,
+    )
+    # Friday → Sat–Sun picks
+    _scheduler.add_job(
+        job_smart_sets_sat_sun,
+        CronTrigger(day_of_week="fri", hour=16, minute=0),
+        id="smart_sets_sat_sun",
+        replace_existing=True,
+    )
+
     # Resolve finished matches every 2 hours
     _scheduler.add_job(
         job_resolve_matches,
@@ -690,6 +889,16 @@ def start_scheduler():
         job_ingest_multi_sport_history,
         CronTrigger(hour=2, minute=0),
         id="ingest_multi_sport",
+        replace_existing=True,
+    )
+
+    # Browser-based Sofascore ingestion — daily at 02:30 UTC
+    # Fetches cricket, rugby, handball, volleyball, tennis using Playwright
+    # (httpx gets 403 for these; real browser fingerprint passes bot detection)
+    _scheduler.add_job(
+        job_browser_ingest_sofascore,
+        CronTrigger(hour=2, minute=30),
+        id="browser_ingest_sofascore",
         replace_existing=True,
     )
 

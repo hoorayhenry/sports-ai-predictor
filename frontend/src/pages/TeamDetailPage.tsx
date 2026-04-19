@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import Spinner from "../components/Spinner";
 import { api } from "../api/client";
+import { getCompetitionSlug } from "../utils/competitionSlug";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -196,12 +197,21 @@ function PlayerHeadshot({ player, size = "w-12 h-12" }: { player: Player; size?:
 function FixtureCard({ fixture }: { fixture: NextFixture }) {
   const home = fixture.competitors.find(c => c.home_away === "home");
   const away = fixture.competitors.find(c => c.home_away === "away");
+  const navigate = useNavigate();
+  const compSlug = getCompetitionSlug(fixture.competition ?? "");
 
   return (
     <div className="card overflow-hidden">
       <div className="px-4 py-2.5 border-b border-pi-border/30 flex items-center justify-between">
         <span className="section-label text-pi-muted">Upcoming Fixture</span>
-        <span className="text-xs text-pi-muted">{fixture.competition}</span>
+        {compSlug ? (
+          <button className="text-xs text-pi-muted hover:text-pi-sky transition-colors"
+            onClick={() => navigate(`/tables?slug=${compSlug}`)}>
+            {fixture.competition}
+          </button>
+        ) : (
+          <span className="text-xs text-pi-muted">{fixture.competition}</span>
+        )}
       </div>
       <div className="p-5">
         <div className="flex items-center justify-between gap-4">
@@ -247,15 +257,26 @@ function FixtureCard({ fixture }: { fixture: NextFixture }) {
 function ResultRow({ result, showCompetition = false }: { result: Result; teamId: string; showCompetition?: boolean }) {
   const home = result.competitors.find(c => c.home_away === "home");
   const away = result.competitors.find(c => c.home_away === "away");
+  const navigate = useNavigate();
+  const compSlug = getCompetitionSlug(result.competition ?? "");
   if (!home || !away) return null;
 
   return (
     <div className="flex flex-col border-b border-pi-border/10 last:border-0 hover:bg-white/[0.02] transition-colors">
       {showCompetition && result.competition && (
         <div className="px-4 pt-2 pb-0">
-          <span className="text-[10px] font-semibold text-pi-indigo-light/70 bg-pi-indigo/10 border border-pi-indigo/20 px-1.5 py-0.5 rounded">
-            {result.competition}
-          </span>
+          {compSlug ? (
+            <button
+              className="text-[10px] font-semibold text-pi-indigo-light/70 bg-pi-indigo/10 border border-pi-indigo/20 px-1.5 py-0.5 rounded hover:text-pi-sky transition-colors"
+              onClick={() => navigate(`/tables?slug=${compSlug}`)}
+            >
+              {result.competition}
+            </button>
+          ) : (
+            <span className="text-[10px] font-semibold text-pi-indigo-light/70 bg-pi-indigo/10 border border-pi-indigo/20 px-1.5 py-0.5 rounded">
+              {result.competition}
+            </span>
+          )}
         </div>
       )}
       <div className="flex items-center gap-3 px-4 py-2.5">
@@ -484,25 +505,27 @@ export default function TeamDetailPage() {
   return (
     <div className="min-h-screen pb-24 md:pb-8">
 
+      {/* ── Back button ───────────────────────────────────────────────────── */}
+      <div className="px-4 pt-4 md:px-8">
+        <button
+          onClick={() => navigate(-1)}
+          className="inline-flex items-center gap-1.5 text-[13px] text-pi-muted hover:text-pi-primary transition-colors"
+        >
+          <ArrowLeft size={14} /> Back
+        </button>
+      </div>
+
       {/* ── Hero ─────────────────────────────────────────────────────────── */}
       <div
-        className="relative overflow-hidden md:rounded-2xl md:mx-4 md:mt-4"
+        className="relative overflow-hidden md:rounded-2xl md:mx-4 md:mt-2"
         style={{
           background: `linear-gradient(135deg, ${team.primary_color}55 0%, #0d1020 60%)`,
           borderBottom: `2px solid ${team.primary_color}44`,
         }}
       >
-        <div className="absolute inset-0 bg-[#070c19]/65" />
+        <div className="absolute inset-0 bg-[#070c19]/65 pointer-events-none" />
 
-        {/* Back */}
-        <button
-          onClick={() => navigate(-1)}
-          className="absolute top-4 left-4 z-10 flex items-center gap-1.5 text-xs text-white/70 hover:text-white transition-colors bg-black/30 backdrop-blur-sm px-3 py-1.5 rounded-full border border-white/10"
-        >
-          <ArrowLeft size={13} /> Back
-        </button>
-
-        <div className="relative z-10 px-5 pt-14 pb-0 flex items-center gap-5">
+        <div className="relative z-10 px-5 pt-6 pb-0 flex items-center gap-5">
           {/* Large team logo */}
           <div
             className="w-24 h-24 rounded-2xl flex items-center justify-center shrink-0 shadow-2xl"

@@ -21,17 +21,21 @@ SPORT_CATEGORY = {
     "cricket_":         "cricket",
 }
 
-# Markets that work for each sport category (btts/totals cause 422 on many sports)
+# Markets fetched per sport category.
+# totals  → over/under lines (point field holds 1.5 / 2.5 / 3.5 etc.)
+# btts    → Both Teams To Score (football)
+# draw_no_bet → DNB home/away (football)
+# spreads → Asian handicap / point spread (basketball, NFL, etc.)
 SPORT_MARKETS = {
-    "football":         "h2h,totals",
-    "basketball":       "h2h,spreads",
+    "football":         "h2h,totals,btts,draw_no_bet",
+    "basketball":       "h2h,totals,spreads",
     "tennis":           "h2h",
-    "american_football":"h2h,spreads",
+    "american_football":"h2h,totals,spreads",
     "ice_hockey":       "h2h,totals",
-    "baseball":         "h2h,spreads",
-    "rugby":            "h2h",
-    "volleyball":       "h2h",
-    "cricket":          "h2h",
+    "baseball":         "h2h,totals,spreads",
+    "rugby":            "h2h,totals",
+    "volleyball":       "h2h,totals",
+    "cricket":          "h2h,totals",
 }
 
 
@@ -104,9 +108,22 @@ class OddsAPIClient:
             away = ev.get("away_team", "")
             for bm in ev.get("bookmakers", []):
                 for mkt in bm.get("markets", []):
+                    mkt_key = mkt.get("key", "")
                     for o in mkt.get("outcomes", []):
                         n = o.get("name", "").lower()
-                        if home.lower()[:4] in n or n == "home":
+                        # Normalise outcome name → internal key
+                        if mkt_key == "draw_no_bet":
+                            # Outcomes are team names — map to home/away
+                            ok = "home" if (home.lower()[:4] in n or n == home.lower()) else "away"
+                        elif mkt_key == "double_chance":
+                            # "Home/Draw" → home_draw, "Away/Draw" → away_draw, "Home/Away" → home_away
+                            if "home" in n and "draw" in n:
+                                ok = "home_draw"
+                            elif "away" in n and "draw" in n:
+                                ok = "away_draw"
+                            else:
+                                ok = "home_away"
+                        elif home.lower()[:4] in n or n == "home":
                             ok = "home"
                         elif away.lower()[:4] in n or n == "away":
                             ok = "away"

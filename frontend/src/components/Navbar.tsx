@@ -1,8 +1,10 @@
+import { useState, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { Home, Flame, Target, BarChart2, History, Newspaper, Activity, Trophy, Radio } from "lucide-react";
+import { Home, Flame, Target, BarChart2, History, Newspaper, Activity, Trophy, Radio, Search } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { fetchLiveScores } from "../api/client";
 import logoUrl from "../assets/playsigma-logo.svg";
+import SearchBar from "./SearchBar";
 
 const NAV = [
   { to: "/",            label: "Matches",  icon: Home },
@@ -18,6 +20,7 @@ const NAV = [
 
 export default function Navbar() {
   const { pathname } = useLocation();
+  const [searchOpen, setSearchOpen] = useState(false);
 
   const { data: liveData } = useQuery({
     queryKey: ["live-scores-nav"],
@@ -27,8 +30,23 @@ export default function Navbar() {
   });
   const liveCount = liveData?.matches?.length ?? 0;
 
+  // Cmd/Ctrl+K opens search
+  useEffect(() => {
+    function handleKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        setSearchOpen(s => !s);
+      }
+    }
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, []);
+
   return (
     <>
+      {/* ── Search overlay ────────────────────────────────── */}
+      <SearchBar isOpen={searchOpen} onClose={() => setSearchOpen(false)} />
+
       {/* ── Desktop top bar ───────────────────────────────── */}
       <header className="hidden md:flex items-center justify-between px-6 py-3 navbar-glass sticky top-0 z-50">
 
@@ -64,8 +82,19 @@ export default function Navbar() {
           })}
         </nav>
 
-        {/* Status pill */}
+        {/* Right side: search + live pill */}
         <div className="flex items-center gap-2">
+          {/* Search button */}
+          <button
+            onClick={() => setSearchOpen(true)}
+            className="flex items-center gap-2 text-xs text-pi-muted bg-pi-surface/80 border border-pi-border/60 hover:border-pi-indigo/40 hover:text-pi-primary px-3 py-1.5 rounded-full transition-all"
+          >
+            <Search size={13} />
+            <span>Search</span>
+            <kbd className="text-[10px] text-pi-muted/50 border border-pi-border/40 px-1 py-0.5 rounded font-mono">⌘K</kbd>
+          </button>
+
+          {/* Live pill */}
           <Link to="/live" className="flex items-center gap-1.5 text-xs text-pi-secondary bg-pi-surface px-3 py-1.5 rounded-full border border-pi-border hover:border-pi-emerald/40 transition-colors">
             <span className="w-1.5 h-1.5 rounded-full bg-pi-emerald animate-pulse" />
             {liveCount > 0 ? (
@@ -79,7 +108,16 @@ export default function Navbar() {
 
       {/* ── Mobile bottom tab bar ─────────────────────────── */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 navbar-glass border-t border-pi-border flex safe-bottom">
-        {NAV.map(({ to, label, icon: Icon }) => {
+        {/* Search tap target — replaces one nav slot on mobile */}
+        <button
+          onClick={() => setSearchOpen(true)}
+          className="flex-1 flex flex-col items-center justify-center py-2.5 gap-0.5 text-[11px] font-medium text-pi-muted transition-colors duration-200"
+        >
+          <Search size={17} strokeWidth={1.7} />
+          <span>Search</span>
+        </button>
+
+        {NAV.slice(0, 8).map(({ to, label, icon: Icon }) => {
           const active = pathname === to;
           return (
             <Link

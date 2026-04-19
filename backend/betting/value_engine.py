@@ -53,12 +53,18 @@ def evaluate_match(db: Session, match_id: int, predictions: dict) -> list[ValueB
         if p is not None:
             checks.append(("h2h", db_out, p))
 
-    # ── Over/Under (all lines) ────────────────────────────────────────────
+    # ── Over/Under (football lines) ───────────────────────────────────────
     for mkt_key, db_mkt in [("over15", "totals15"), ("over25", "totals"), ("over35", "totals35")]:
         mkt = predictions.get(mkt_key, {})
         if mkt:
             checks.append((db_mkt, "over",  mkt.get("over",  0)))
             checks.append((db_mkt, "under", mkt.get("under", 0)))
+
+    # ── Over/Under (sport-specific main line: basketball 215.5, baseball 9.5…) ─
+    over_main = predictions.get("over_main", {})
+    if over_main:
+        checks.append(("totals", "over",  over_main.get("over",  0)))
+        checks.append(("totals", "under", over_main.get("under", 0)))
 
     # ── BTTS ──────────────────────────────────────────────────────────────
     btts = predictions.get("btts", {})
@@ -171,8 +177,8 @@ def save_predictions(db: Session, match: Match, pred_probs: dict, value_bets: li
     # Store all probabilities for every market so the API can serve any of them
     markets: dict = {}
 
-    # ML-trained markets
-    for mkt in ["result", "over15", "over25", "over35", "btts", "home_cs", "away_cs"]:
+    # ML-trained markets (sport-adaptive — store whatever the model returned)
+    for mkt in ["result", "over15", "over25", "over35", "btts", "home_cs", "away_cs", "over_main"]:
         if mkt in pred_probs:
             markets[mkt] = pred_probs[mkt]
 

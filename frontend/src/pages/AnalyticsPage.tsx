@@ -233,6 +233,13 @@ export default function AnalyticsPage() {
                           ("an-hist",     "/analytics/confidence-histogram",  120_000);
   const health        = q<any>              ("an-health",       "/analytics/model-health",          300_000);
   const sportBreakdown = q<{data: SportRow[]}>("an-sport-bd",  "/analytics/sport-breakdown",        300_000);
+  // Live training progress — polls every 2s while training, 30s when idle
+  const trainProg = useQuery<any>({
+    queryKey: ["an-train-prog"],
+    queryFn:  () => api.get("/analytics/training-progress").then(r => r.data),
+    staleTime: 0,
+    refetchInterval: (query) => (query.state.data as any)?.is_training ? 2_000 : 30_000,
+  });
   const learningCurve  = q<{data: Record<string, LearningPoint[]>, sports: string[]}>(
                           "an-learn",          "/analytics/learning-curve",         600_000);
 
@@ -884,7 +891,171 @@ export default function AnalyticsPage() {
         </div>
       </div>
 
-      {/* ── 8. Model health + training log ──────────────────────────── */}
+      {/* ── 8a. Model Training Status ───────────────────────────────── */}
+      <div className="card p-5 mb-6">
+        <div className="flex items-start justify-between mb-5">
+          <SectionHeader
+            icon={<Cpu size={14} className="text-pi-emerald" />}
+            title="Model Training Status"
+            sub="Live status of trained models across all sports — auto-retrains every Sunday at 03:00 UTC"
+          />
+          {trainProg.data?.is_training && (
+            <span className="flex items-center gap-1.5 text-[11px] text-pi-emerald font-semibold animate-pulse shrink-0">
+              <span className="w-2 h-2 rounded-full bg-pi-emerald inline-block" />
+              Training…
+            </span>
+          )}
+        </div>
+
+        {/* Overall live progress bar — shown while training (or just finished) */}
+        {trainProg.data && (trainProg.data.is_training || trainProg.data.overall_pct > 0) && (
+          <div className="mb-5">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[11px] text-pi-secondary font-medium">
+                {trainProg.data.is_training
+                  ? `Training ${trainProg.data.current_sport?.replace(/_/g, " ") ?? "…"}${trainProg.data.current_market ? ` · ${trainProg.data.current_market}` : ""}`
+                  : "Training complete"}
+              </span>
+              <span className="text-[11px] font-bold text-white tabular-nums">
+                {trainProg.data.overall_pct.toFixed(0)}%
+              </span>
+            </div>
+            <div className="h-2.5 rounded-full bg-pi-surface overflow-hidden">
+              <div
+                className="h-2.5 rounded-full transition-all duration-500"
+                style={{
+                  width: `${trainProg.data.overall_pct}%`,
+                  background: trainProg.data.is_training
+                    ? `linear-gradient(90deg, ${C.indigo}, ${C.emerald})`
+                    : C.emerald,
+                  boxShadow: trainProg.data.is_training ? `0 0 8px ${C.indigo}80` : "none",
+                }}
+              />
+            </div>
+            {trainProg.data.is_training && (
+              <p className="text-[10px] text-pi-muted mt-1">
+                {Object.values(trainProg.data.sports as Record<string, any>).filter(s => s.status === "done").length} of 10 sports complete
+              </p>
+            )}
+          </div>
+        )}
+
+        {health.isLoading || sportBreakdown.isLoading ? (
+          <div className="flex justify-center py-8"><Spinner size={28} /></div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
+              {["football","basketball","tennis","baseball","american_football","ice_hockey","cricket","rugby","handball","volleyball"].map(sport => {
+                const modelFile   = health.data?.model_files?.find((m: any) => m.sport === sport);
+                const sportRow    = sportBreakdown.data?.data?.find((s: SportRow) => s.sport === sport);
+                const liveSport   = (trainProg.data?.sports as Record<string, any> | undefined)?.[sport];
+
+                // Live state overrides static when actively training
+                const isLiveTraining = liveSport?.status === "training";
+                const isLiveDone     = liveSport?.status === "done";
+                const livePct        = liveSport?.pct ?? 0;
+                const liveMarketsDone = liveSport?.markets_done ?? 0;
+                const liveMarketsTotal = liveSport?.markets_total ?? 7;
+
+                const isTrained   = isLiveDone || !!modelFile;
+                const lastTrained = modelFile?.modified ?? sportRow?.last_trained;
+                const trainingRows = liveSport?.rows ?? sportRow?.training_rows ?? 0;
+                const modelAcc    = isLiveDone ? liveSport?.accuracy : sportRow?.model_accuracy;
+
+                const daysSince = lastTrained
+                  ? (Date.now() - new Date(lastTrained).getTime()) / 86_400_000
+                  : Infinity;
+                const isStale = isTrained && !isLiveTraining && !isLiveDone && daysSince > 7;
+
+                const statusColor = isLiveTraining ? C.indigo
+                  : !isTrained   ? C.rose
+                  : isStale      ? C.amber
+                  : C.emerald;
+                const statusLabel = isLiveTraining ? "Training"
+                  : !isTrained   ? "No Model"
+                  : isStale      ? "Stale"
+                  : "Trained";
+                const statusIcon  = isLiveTraining ? "⟳"
+                  : !isTrained   ? "✕"
+                  : isStale      ? "!"
+                  : "✓";
+
+                return (
+                  <div key={sport} className="rounded-xl p-3 flex flex-col gap-1"
+                    style={{
+                      background: isLiveTraining ? `${C.indigo}10` : "rgba(255,255,255,0.03)",
+                      border: `1px solid ${statusColor}33`,
+                    }}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-lg">{SPORT_ICONS[sport] ?? "🏆"}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${isLiveTraining ? "animate-pulse" : ""}`}
+                        style={{ background: `${statusColor}20`, color: statusColor }}>
+                        {statusIcon} {statusLabel}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-semibold text-white capitalize leading-tight">
+                      {sport.replace(/_/g, " ")}
+                    </p>
+
+                    {/* Live training progress bar */}
+                    {isLiveTraining ? (
+                      <>
+                        <p className="text-[10px] text-pi-muted">{trainingRows.toLocaleString()} rows</p>
+                        <p className="text-[10px] text-pi-secondary">
+                          Market {liveMarketsDone}/{liveMarketsTotal}
+                          {trainProg.data?.current_sport === sport && trainProg.data?.current_market
+                            ? ` · ${trainProg.data.current_market}`
+                            : ""}
+                        </p>
+                        <div className="mt-1.5 h-2 rounded-full bg-pi-surface overflow-hidden">
+                          <div
+                            className="h-2 rounded-full transition-all duration-500"
+                            style={{
+                              width: `${livePct}%`,
+                              background: `linear-gradient(90deg, ${C.indigo}, ${C.violet})`,
+                              boxShadow: `0 0 6px ${C.indigo}80`,
+                            }}
+                          />
+                        </div>
+                        <p className="text-[10px] font-bold tabular-nums" style={{ color: C.indigo }}>
+                          {livePct.toFixed(0)}%
+                        </p>
+                      </>
+                    ) : isTrained ? (
+                      <>
+                        <p className="text-[10px] text-pi-muted">{timeAgo(lastTrained)}</p>
+                        <p className="text-[10px] text-pi-secondary">{trainingRows.toLocaleString()} rows</p>
+                        {modelAcc != null && (
+                          <p className="text-[10px] font-bold mt-0.5" style={{ color: accColor(modelAcc) }}>
+                            {pct(modelAcc)} acc
+                          </p>
+                        )}
+                        <div className="mt-1.5 h-1 rounded-full bg-pi-surface overflow-hidden">
+                          <div className="h-1 rounded-full transition-all"
+                            style={{
+                              width: `${Math.min(100, (trainingRows / 50_000) * 100)}%`,
+                              background: trainingRows >= 40_000 ? C.emerald : trainingRows >= 10_000 ? C.amber : C.indigo,
+                            }}
+                          />
+                        </div>
+                      </>
+                    ) : (
+                      <p className="text-[10px] text-pi-muted mt-1 leading-snug">Needs training data</p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <p className="text-[10px] text-pi-muted mt-3 leading-relaxed">
+              Stale = model not retrained in 7+ days. Data bar = training rows vs 50k target.
+              {" "}Training runs in the background and does not block the app.
+            </p>
+          </>
+        )}
+      </div>
+
+      {/* ── 8b. Model health + training log ─────────────────────────── */}
       <div className="grid md:grid-cols-2 gap-5 mb-6">
 
         {/* Model files */}

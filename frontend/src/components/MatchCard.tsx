@@ -141,6 +141,8 @@ export default function MatchCard({ match, decision: dec }: Props) {
   const awayProb = pred?.away_win_prob ?? dec?.away_win_prob ?? null;
   const over25   = pred?.over25_prob   ?? dec?.over25_prob   ?? null;
   const btts     = pred?.btts_prob     ?? dec?.btts_prob     ?? null;
+  // Non-football totals (basketball pts, baseball runs, etc.)
+  const overMain = (pred?.markets ?? dec?.markets)?.over_main ?? null;
 
   const signals  = match?.intelligence?.signals ?? [];
 
@@ -277,11 +279,16 @@ export default function MatchCard({ match, decision: dec }: Props) {
         )}
 
         {/* Side market probabilities */}
-        {(over25 != null || btts != null) && (
+        {(over25 != null || btts != null || overMain != null) && (
           <div className="mt-2.5 pt-2.5 border-t border-pi-border/50 flex gap-3 text-xs text-pi-muted">
             {over25 != null && (
               <span>
                 O2.5 <span className="text-pi-primary font-semibold tabular-nums">{Math.round(over25 * 100)}%</span>
+              </span>
+            )}
+            {overMain != null && (
+              <span>
+                O{overMain.line} <span className="text-pi-primary font-semibold tabular-nums">{Math.round(overMain.over * 100)}%</span>
               </span>
             )}
             {btts != null && (

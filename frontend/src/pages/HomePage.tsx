@@ -438,8 +438,8 @@ function StatChip({ icon, label, value, color = "text-pi-sky" }: {
   return (
     <div className="stat-chip flex items-center gap-1.5 text-sm">
       <span className={color}>{icon}</span>
-      <span className="text-pi-secondary text-xs">{label}</span>
-      <span className="font-semibold text-pi-primary">{value}</span>
+      <span className="text-slate-300 text-xs font-medium">{label}</span>
+      <span className="font-bold text-white">{value}</span>
     </div>
   );
 }

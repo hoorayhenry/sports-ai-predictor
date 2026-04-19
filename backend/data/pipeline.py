@@ -146,16 +146,20 @@ def ingest_events(db: Session, events: list[dict]) -> tuple[int, int]:
 
 def run_live_fetch():
     """
-    Pull latest upcoming fixtures + odds from Sportybet and The Odds API.
-    This is the routine fetch that keeps upcoming matches up to date.
+    Pull latest upcoming fixtures + odds from all sources:
+      1. Sportybet       — fixtures + h2h odds (no key required)
+      2. The Odds API    — h2h / totals / btts / draw_no_bet / spreads
+      3. API-Football    — 20+ markets: double chance, asian handicap,
+                           win to nil, clean sheet, HT/FT, and more
     """
-    from data.sources.sportybet import SportybetClient
-    from data.sources.odds_api  import OddsAPIClient
+    from data.sources.sportybet          import SportybetClient
+    from data.sources.odds_api           import OddsAPIClient
+    from data.sources.api_football_odds  import fetch_and_save_af_odds
 
     sb_events = []
     oa_events = []
 
-    # Sportybet — no key required
+    # ── 1. Sportybet fixtures ────────────────────────────────────────
     try:
         sb = SportybetClient()
         sb_events = sb.get_all_sports(hours_ahead=168)   # 7 days ahead
@@ -163,7 +167,7 @@ def run_live_fetch():
     except Exception as e:
         logger.error(f"Sportybet fetch error: {e}")
 
-    # Odds API — requires key
+    # ── 2. The Odds API fixtures + base odds ─────────────────────────
     try:
         oa = OddsAPIClient()
         oa_events = oa.fetch_all()
@@ -171,11 +175,22 @@ def run_live_fetch():
     except Exception as e:
         logger.error(f"Odds API fetch error: {e}")
 
+    # Ingest fixtures first so AF matches have DB ids before we add odds
     all_events = sb_events + oa_events
-
     with get_sync_session() as db:
         saved, updated = ingest_events(db, all_events)
-    logger.info(f"Live fetch complete — {saved} new, {updated} updated")
+    logger.info(f"Fixtures ingested — {saved} new, {updated} updated")
+
+    # ── 3. API-Football extended odds (20+ markets) ──────────────────
+    # Runs after fixture ingest so match rows exist; saves directly to MatchOdds
+    try:
+        with get_sync_session() as db:
+            af_lines = fetch_and_save_af_odds(db, days_ahead=7)
+        logger.info(f"API-Football odds: {af_lines} price lines saved")
+    except Exception as e:
+        logger.error(f"API-Football odds fetch error: {e}")
+
+    logger.info("Live fetch complete")
 
 
 # ── Historical load (one-time setup) ─────────────────────────────────

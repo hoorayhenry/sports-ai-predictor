@@ -187,27 +187,28 @@ export default function PlayerDetailPage() {
   return (
     <div className="min-h-screen pb-24 md:pb-8">
 
+      {/* ── Back button ───────────────────────────────────────────────────── */}
+      <div className="px-4 pt-4 md:px-8">
+        <button
+          onClick={() => window.history.length > 1 ? navigate(-1) : navigate("/")}
+          className="inline-flex items-center gap-1.5 text-[13px] text-pi-muted hover:text-pi-primary transition-colors"
+        >
+          <ArrowLeft size={14} /> Back
+        </button>
+      </div>
+
       {/* ── Hero ─────────────────────────────────────────────────────────── */}
       <div
-        className="relative overflow-hidden rounded-b-2xl md:rounded-2xl md:mx-4 md:mt-4 mb-0"
+        className="relative overflow-hidden rounded-b-2xl md:rounded-2xl md:mx-4 md:mt-2 mb-0"
         style={{
           background: `linear-gradient(135deg, ${posColor}33 0%, #070c19 70%)`,
           minHeight: 220,
           borderBottom: `2px solid ${posColor}44`,
         }}
       >
-        <div className="absolute inset-0 bg-[#070c19]/60" />
+        <div className="absolute inset-0 bg-[#070c19]/60 pointer-events-none" />
 
-        {/* Back button */}
-        <button
-          onClick={() => window.history.length > 1 ? navigate(-1) : navigate("/")}
-          className="absolute top-4 left-4 z-10 flex items-center gap-1.5 text-sm text-white/80 hover:text-white transition-colors bg-black/40 backdrop-blur-sm px-4 py-2 rounded-full border border-white/15 hover:border-white/30"
-        >
-          <ArrowLeft size={15} />
-          Back
-        </button>
-
-        <div className="relative z-10 px-5 pt-14 pb-0 flex items-end gap-4">
+        <div className="relative z-10 px-5 pt-6 pb-0 flex items-end gap-4">
           {/* Headshot */}
           {(() => {
             const urls = headshotUrls(playerId!, player.headshot);
@@ -251,12 +252,24 @@ export default function PlayerDetailPage() {
             {/* Team + shirt number */}
             <div className="flex items-center gap-2 mt-1.5 flex-wrap">
               {player.team?.name && (
-                <span className="text-xs font-semibold text-white/60 flex items-center gap-1.5">
-                  {player.team.logo && (
-                    <img src={player.team.logo} alt="" className="w-4 h-4 object-contain" />
-                  )}
-                  {player.team.name}
-                </span>
+                player.team.id && player.team.league_slug ? (
+                  <Link
+                    to={`/team/${player.team.league_slug}/${player.team.id}`}
+                    className="text-xs font-semibold text-white/60 hover:text-white/90 transition-colors flex items-center gap-1.5"
+                  >
+                    {player.team.logo && (
+                      <img src={player.team.logo} alt="" className="w-4 h-4 object-contain" />
+                    )}
+                    {player.team.name}
+                  </Link>
+                ) : (
+                  <span className="text-xs font-semibold text-white/60 flex items-center gap-1.5">
+                    {player.team.logo && (
+                      <img src={player.team.logo} alt="" className="w-4 h-4 object-contain" />
+                    )}
+                    {player.team.name}
+                  </span>
+                )
               )}
               {player.shirt_number && (
                 <span className="text-xs font-bold text-white/40">

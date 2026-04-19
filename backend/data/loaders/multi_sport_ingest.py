@@ -205,15 +205,20 @@ def _parse_espn_event(e: dict, sport_key: str) -> dict:
         except Exception:
             pass
 
+    # Include sport_key in all ESPN external IDs to prevent cross-sport collisions.
+    # ESPN reuses integer IDs across sports (NBA team 19 ≠ MLB team 19), so without
+    # scoping, the first sport to ingest would claim low-numbered IDs and subsequent
+    # sports would be mapped to the wrong participants.
+    sk = sport_key  # short alias
     return {
-        "external_id":     f"espn_{e.get('id', '')}",
+        "external_id":     f"espn_{sk}_{e.get('id', '')}",
         "sport_key":       sport_key,
-        "competition_ext": f"espn_comp_{league.get('id', sport_key)}",
+        "competition_ext": f"espn_{sk}_comp_{league.get('id', sport_key)}",
         "competition_name": league.get("name") or sport_key.replace("_", " ").title(),
         "country":         "USA",
-        "home_ext":        f"espn_team_{_tid(home)}",
+        "home_ext":        f"espn_{sk}_team_{_tid(home)}",
         "home_name":       _tname(home),
-        "away_ext":        f"espn_team_{_tid(away)}",
+        "away_ext":        f"espn_{sk}_team_{_tid(away)}",
         "away_name":       _tname(away),
         "home_score":      hs,
         "away_score":      as_,
@@ -270,72 +275,104 @@ def upsert_events(db: Session, events: list[dict]) -> int:
     """
     Upsert a list of normalised event dicts into Sport/Competition/Participant/Match.
     Returns number of new matches inserted.
+
+    Robust against duplicates: de-dupes by external_id before processing so a
+    match appearing on two different Sofascore "day" pages doesn't crash the batch.
+    Each event is committed individually so one bad row can't roll back the batch.
     """
     from data.db_models.models import Match
 
     inserted = 0
-    sport_cache: dict[str, int]          = {}
-    comp_cache:  dict[str, int]          = {}
-    part_cache:  dict[str, int]          = {}
+    sport_cache: dict[str, int] = {}
+    comp_cache:  dict[str, int] = {}
+    part_cache:  dict[str, int] = {}
 
+    # De-duplicate within the batch — keep the entry with the richest data
+    # (prefer finished over scheduled, with scores over without)
+    deduped: dict[str, dict] = {}
     for ev in events:
+        ext_id = ev.get("external_id", "")
+        if not ext_id:
+            continue
+        existing = deduped.get(ext_id)
+        if existing is None:
+            deduped[ext_id] = ev
+        else:
+            # Prefer the version with a result
+            if ev.get("result") and not existing.get("result"):
+                deduped[ext_id] = ev
+
+    for ev in deduped.values():
         if not ev.get("home_name") or not ev.get("away_name"):
             continue
         if not ev.get("match_date"):
             continue
 
-        sport_key = ev["sport_key"]
+        try:
+            sport_key = ev["sport_key"]
 
-        # Sport
-        if sport_key not in sport_cache:
-            sport_cache[sport_key] = _ensure_sport(db, sport_key)
-        sport_id = sport_cache[sport_key]
+            # Sport
+            if sport_key not in sport_cache:
+                sport_cache[sport_key] = _ensure_sport(db, sport_key)
+            sport_id = sport_cache[sport_key]
 
-        # Competition
-        comp_ext = ev["competition_ext"]
-        if comp_ext not in comp_cache:
-            comp_cache[comp_ext] = _ensure_competition(
-                db, comp_ext, ev["competition_name"], ev.get("country", ""), sport_id
-            )
-        comp_id = comp_cache[comp_ext]
+            # Competition
+            comp_ext = ev["competition_ext"]
+            if comp_ext not in comp_cache:
+                comp_cache[comp_ext] = _ensure_competition(
+                    db, comp_ext, ev["competition_name"], ev.get("country", ""), sport_id
+                )
+            comp_id = comp_cache[comp_ext]
 
-        # Participants
-        h_ext = ev["home_ext"]
-        a_ext = ev["away_ext"]
-        if h_ext not in part_cache:
-            part_cache[h_ext] = _ensure_participant(db, h_ext, ev["home_name"], sport_id)
-        if a_ext not in part_cache:
-            part_cache[a_ext] = _ensure_participant(db, a_ext, ev["away_name"], sport_id)
-        home_id = part_cache[h_ext]
-        away_id = part_cache[a_ext]
+            # Participants
+            h_ext = ev["home_ext"]
+            a_ext = ev["away_ext"]
+            if h_ext not in part_cache:
+                part_cache[h_ext] = _ensure_participant(db, h_ext, ev["home_name"], sport_id)
+            if a_ext not in part_cache:
+                part_cache[a_ext] = _ensure_participant(db, a_ext, ev["away_name"], sport_id)
+            home_id = part_cache[h_ext]
+            away_id = part_cache[a_ext]
 
-        # Match — upsert
-        ext_id = ev["external_id"]
-        match  = db.query(Match).filter_by(external_id=ext_id).first()
-        if match:
-            # Update score/result if now available
-            if ev["home_score"] is not None:
-                match.home_score = ev["home_score"]
-            if ev["away_score"] is not None:
-                match.away_score = ev["away_score"]
-            if ev["result"]:
-                match.result = ev["result"]
-            if ev["status"] != "scheduled":
-                match.status = ev["status"]
-        else:
-            match = Match(
-                external_id    = ext_id,
-                competition_id = comp_id,
-                home_id        = home_id,
-                away_id        = away_id,
-                match_date     = ev["match_date"],
-                status         = ev["status"],
-                home_score     = ev["home_score"],
-                away_score     = ev["away_score"],
-                result         = ev["result"],
-            )
-            db.add(match)
-            inserted += 1
+            # Match — upsert
+            ext_id = ev["external_id"]
+            match  = db.query(Match).filter_by(external_id=ext_id).first()
+            if match:
+                # Update score/result if now available
+                if ev["home_score"] is not None:
+                    match.home_score = ev["home_score"]
+                if ev["away_score"] is not None:
+                    match.away_score = ev["away_score"]
+                if ev["result"]:
+                    match.result = ev["result"]
+                if ev["status"] != "scheduled":
+                    match.status = ev["status"]
+            else:
+                match = Match(
+                    external_id    = ext_id,
+                    competition_id = comp_id,
+                    home_id        = home_id,
+                    away_id        = away_id,
+                    match_date     = ev["match_date"],
+                    status         = ev["status"],
+                    home_score     = ev["home_score"],
+                    away_score     = ev["away_score"],
+                    result         = ev["result"],
+                )
+                db.add(match)
+                inserted += 1
+
+            db.flush()   # write to session; commit happens below or raises here
+
+        except Exception as row_err:
+            # One bad row must not kill the batch — rollback just this row
+            db.rollback()
+            logger.debug(f"[upsert] skipped event {ev.get('external_id','?')}: {row_err}")
+            # Re-populate caches after rollback (they may reference stale objects)
+            sport_cache.clear()
+            comp_cache.clear()
+            part_cache.clear()
+            continue
 
     try:
         db.commit()

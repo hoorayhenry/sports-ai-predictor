@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { History, CheckCircle2, XCircle, Minus } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
 import { fetchPredictionHistory, fetchSports } from "../api/client";
 import SportTabs from "../components/SportTabs";
 import Spinner from "../components/Spinner";
 import { formatDate } from "../utils/format";
+import { getCompetitionSlug } from "../utils/competitionSlug";
 import type { PredictionHistory } from "../api/types";
 
 const DAYS_OPTIONS = [7, 30, 60, 90];
@@ -75,9 +77,14 @@ export default function HistoryPage() {
             { label: "Win %", value: `${winPct}%`, color: winPct >= 55 ? "text-pi-emerald" : winPct >= 45 ? "text-pi-amber" : "text-pi-rose" },
             { label: "P&L",   value: `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}u`, color: pnl >= 0 ? "text-pi-emerald" : "text-pi-rose" },
           ].map(({ label, value, color }) => (
-            <div key={label} className="card p-3 text-center">
+            <div key={label} className="p-3 text-center rounded-xl"
+              style={{
+                background: "linear-gradient(145deg, rgba(28,40,76,0.98) 0%, rgba(18,28,58,0.98) 100%)",
+                border: "1px solid rgba(99,120,210,0.48)",
+                boxShadow: "0 2px 14px rgba(0,0,0,0.45), 0 1px 0 rgba(255,255,255,0.07) inset",
+              }}>
               <p className={`text-lg font-bold tabular-nums ${color}`}>{value}</p>
-              <p className="text-[10px] text-pi-muted mt-0.5 section-label">{label}</p>
+              <p className="text-[10px] font-semibold tracking-widest uppercase text-slate-400 mt-0.5">{label}</p>
             </div>
           ))}
         </div>
@@ -110,70 +117,90 @@ export default function HistoryPage() {
 
 function HistoryRow({ item }: { item: PredictionHistory }) {
   const isPlay = item.ai_decision === "PLAY";
+  const slug = getCompetitionSlug(item.competition ?? "");
+  const navigate = useNavigate();
 
   return (
-    <div className={`card p-3 transition-all ${
-      item.is_correct
-        ? "border-pi-emerald/25"
-        : "border-pi-rose/20"
-    }`}>
-      <div className="flex items-center gap-3">
-        <div className="shrink-0">
-          {item.is_correct ? (
-            <CheckCircle2 size={20} className="text-pi-emerald" />
-          ) : isPlay ? (
-            <XCircle size={20} className="text-pi-rose" />
-          ) : (
-            <Minus size={20} className="text-pi-muted" />
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => navigate(`/match/${item.match_id}`)}
+      onKeyDown={(e) => e.key === "Enter" && navigate(`/match/${item.match_id}`)}
+      className="block cursor-pointer"
+    >
+      <div className={`card p-3 transition-all ${
+        item.is_correct
+          ? "border-pi-emerald/25"
+          : "border-pi-rose/20"
+      }`}>
+        <div className="flex items-center gap-3">
+          <div className="shrink-0">
+            {item.is_correct ? (
+              <CheckCircle2 size={20} className="text-pi-emerald" />
+            ) : isPlay ? (
+              <XCircle size={20} className="text-pi-rose" />
+            ) : (
+              <Minus size={20} className="text-pi-muted" />
+            )}
+          </div>
+
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1 text-[10px] text-pi-muted mb-0.5">
+              <span>{item.sport_icon}</span>
+              {slug ? (
+                <Link
+                  to={`/tables?slug=${slug}`}
+                  className="truncate hover:text-pi-sky transition-colors"
+                  onClick={e => e.stopPropagation()}
+                >
+                  {item.competition}
+                </Link>
+              ) : (
+                <span className="truncate">{item.competition}</span>
+              )}
+              <span className="ml-auto shrink-0">{item.match_date ? formatDate(item.match_date) : "—"}</span>
+            </div>
+            <p className="text-sm font-semibold truncate font-display">
+              <span className="text-pi-primary">{item.home_team}</span>
+              <span className="text-pi-muted mx-1">vs</span>
+              <span className="text-pi-primary">{item.away_team}</span>
+            </p>
+          </div>
+
+          <div className="flex flex-col items-end gap-0.5 shrink-0 text-right">
+            <div className="text-[11px]">
+              <span className="text-pi-muted">Pick: </span>
+              <span className="text-pi-sky font-semibold">{item.predicted_outcome_label}</span>
+            </div>
+            <div className="text-[11px]">
+              <span className="text-pi-muted">Result: </span>
+              <span className={`font-semibold ${item.is_correct ? "text-pi-emerald" : "text-pi-rose"}`}>
+                {item.actual_result_label}
+              </span>
+            </div>
+            {isPlay && (
+              <span className={`text-xs font-bold mt-0.5 tabular-nums ${
+                item.profit_loss_units > 0 ? "text-pi-emerald" :
+                item.profit_loss_units < 0 ? "text-pi-rose" : "text-pi-muted"
+              }`}>
+                {item.profit_loss_units > 0 ? "+" : ""}{item.profit_loss_units.toFixed(2)}u
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-2 flex items-center gap-3 text-[10px] text-pi-muted">
+          <span>Conf <span className="text-pi-secondary">{Math.round(item.confidence_score)}</span></span>
+          {item.predicted_prob && (
+            <span>Prob <span className="text-pi-secondary">{Math.round(item.predicted_prob * 100)}%</span></span>
           )}
-        </div>
-
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1 text-[10px] text-pi-muted mb-0.5">
-            <span>{item.sport_icon}</span>
-            <span className="truncate">{item.competition}</span>
-            <span className="ml-auto shrink-0">{item.match_date ? formatDate(item.match_date) : "—"}</span>
-          </div>
-          <p className="text-sm font-semibold truncate font-display">
-            <span className="text-pi-primary">{item.home_team}</span>
-            <span className="text-pi-muted mx-1">vs</span>
-            <span className="text-pi-primary">{item.away_team}</span>
-          </p>
-        </div>
-
-        <div className="flex flex-col items-end gap-0.5 shrink-0 text-right">
-          <div className="text-[11px]">
-            <span className="text-pi-muted">Pick: </span>
-            <span className="text-pi-sky font-semibold">{item.predicted_outcome_label}</span>
-          </div>
-          <div className="text-[11px]">
-            <span className="text-pi-muted">Result: </span>
-            <span className={`font-semibold ${item.is_correct ? "text-pi-emerald" : "text-pi-rose"}`}>
-              {item.actual_result_label}
-            </span>
-          </div>
-          {isPlay && (
-            <span className={`text-xs font-bold mt-0.5 tabular-nums ${
-              item.profit_loss_units > 0 ? "text-pi-emerald" :
-              item.profit_loss_units < 0 ? "text-pi-rose" : "text-pi-muted"
-            }`}>
-              {item.profit_loss_units > 0 ? "+" : ""}{item.profit_loss_units.toFixed(2)}u
-            </span>
+          {item.recommended_odds && (
+            <span>Odds <span className="text-pi-amber">{item.recommended_odds.toFixed(2)}</span></span>
           )}
+          <span className="ml-auto text-pi-muted/60">
+            {new Date(item.resolved_at).toLocaleDateString()}
+          </span>
         </div>
-      </div>
-
-      <div className="mt-2 flex items-center gap-3 text-[10px] text-pi-muted">
-        <span>Conf <span className="text-pi-secondary">{Math.round(item.confidence_score)}</span></span>
-        {item.predicted_prob && (
-          <span>Prob <span className="text-pi-secondary">{Math.round(item.predicted_prob * 100)}%</span></span>
-        )}
-        {item.recommended_odds && (
-          <span>Odds <span className="text-pi-amber">{item.recommended_odds.toFixed(2)}</span></span>
-        )}
-        <span className="ml-auto text-pi-muted/60">
-          {new Date(item.resolved_at).toLocaleDateString()}
-        </span>
       </div>
     </div>
   );

@@ -15,6 +15,8 @@ import LivePage from "./pages/LivePage";
 import TeamDetailPage from "./pages/TeamDetailPage";
 import PlayerDetailPage from "./pages/PlayerDetailPage";
 import PlayerSearchPage from "./pages/PlayerSearchPage";
+import SsTeamPage from "./pages/SsTeamPage";
+import SsPlayerPage from "./pages/SsPlayerPage";
 
 /** Ball that sweeps full-width across every page */
 function AmbientBall() {
@@ -54,6 +56,8 @@ export default function App() {
           <Route path="/team/:leagueSlug/:teamId"          element={<TeamDetailPage />} />
           <Route path="/player/search"                     element={<PlayerSearchPage />} />
           <Route path="/player/soccer/:playerId"           element={<PlayerDetailPage />} />
+          <Route path="/team/ss/:teamId"                   element={<SsTeamPage />} />
+          <Route path="/player/ss/:playerId"               element={<SsPlayerPage />} />
         </Routes>
       </main>
       <Footer />

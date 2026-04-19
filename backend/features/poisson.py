@@ -109,7 +109,6 @@ class DixonColes:
 
         # Initial parameter vector:
         # [attack_0..n-1, defence_0..n-1, home_adv, rho]
-        # Constraint: sum(attack) = 0 (log-space, one team is anchor)
         x0 = np.zeros(2 * n + 2)
         x0[2 * n]     = math.log(self.home_advantage)
         x0[2 * n + 1] = DEFAULT_RHO
@@ -121,26 +120,53 @@ class DixonColes:
             [(-0.4, 0.0)]               # rho
         )
 
+        # ── Pre-compute numpy arrays for vectorised likelihood ─────────────
+        # Map team names → integer indices; drop rows with unknown teams
+        hi_arr = np.array([team_idx[r] for r in df["home_name"]], dtype=np.int32)
+        ai_arr = np.array([team_idx[r] for r in df["away_name"]], dtype=np.int32)
+        hg_arr = df["home_score"].astype(int).values
+        ag_arr = df["away_score"].astype(int).values
+        w_arr  = df["weight"].values
+
+        # Pre-compute log-factorial for scores (max_goals cap at 12 for PMF)
+        max_g   = max(int(hg_arr.max()), int(ag_arr.max()), 12)
+        logfact = np.array([math.lgamma(k + 1) for k in range(max_g + 1)])
+
+        def _log_poisson(k_arr: np.ndarray, mu: np.ndarray) -> np.ndarray:
+            """Vectorised log P(k; mu) = k*log(mu) - mu - log(k!)"""
+            log_mu = np.log(np.maximum(mu, 1e-9))
+            return k_arr * log_mu - mu - logfact[k_arr]
+
         def neg_log_likelihood(params):
             log_atk = params[:n]
             log_def = params[n:2*n]
             log_ha  = params[2*n]
             rho     = params[2*n+1]
-            ha = math.exp(log_ha)
-            ll = 0.0
-            for _, row in df.iterrows():
-                hi = team_idx.get(row["home_name"])
-                ai = team_idx.get(row["away_name"])
-                if hi is None or ai is None:
-                    continue
-                mu_h = self.league_avg_goals * math.exp(log_atk[hi] - log_def[ai]) * ha
-                mu_a = self.league_avg_goals * math.exp(log_atk[ai] - log_def[hi])
-                hg, ag = int(row["home_score"]), int(row["away_score"])
-                tau = _dc_correction(hg, ag, mu_h, mu_a, rho)
-                p = (tau * _poisson_pmf(hg, mu_h) * _poisson_pmf(ag, mu_a))
-                if p > 1e-10:
-                    ll += row["weight"] * math.log(p)
-            return -ll
+            ha      = math.exp(log_ha)
+
+            # Vectorised Poisson means for all matches
+            mu_h = self.league_avg_goals * np.exp(log_atk[hi_arr] - log_def[ai_arr]) * ha
+            mu_a = self.league_avg_goals * np.exp(log_atk[ai_arr] - log_def[hi_arr])
+
+            # Vectorised Poisson log-PMF
+            lp_h = _log_poisson(hg_arr, mu_h)
+            lp_a = _log_poisson(ag_arr, mu_a)
+
+            # Vectorised Dixon-Coles low-score correction (tau factor in log space)
+            # Only 0-0, 0-1, 1-0, 1-1 deviate from independence
+            log_tau = np.zeros(len(hi_arr))
+            m00 = (hg_arr == 0) & (ag_arr == 0)
+            m01 = (hg_arr == 0) & (ag_arr == 1)
+            m10 = (hg_arr == 1) & (ag_arr == 0)
+            m11 = (hg_arr == 1) & (ag_arr == 1)
+            # tau must stay positive; clip to small positive before log
+            log_tau[m00] = np.log(np.maximum(1.0 - mu_h[m00] * mu_a[m00] * rho, 1e-9))
+            log_tau[m01] = np.log(np.maximum(1.0 + mu_h[m01] * rho,              1e-9))
+            log_tau[m10] = np.log(np.maximum(1.0 + mu_a[m10] * rho,              1e-9))
+            log_tau[m11] = np.log(np.maximum(1.0 - rho,                          1e-9))
+
+            log_p = log_tau + lp_h + lp_a
+            return -float(np.dot(w_arr, log_p))
 
         try:
             result = minimize(
@@ -352,22 +378,30 @@ class DixonColes:
 
 # ── Convenience: fit from DB ──────────────────────────────────────────────────
 
-def build_dc_model_from_db(db, sport_key: str = "football") -> DixonColes:
+def build_dc_model_from_db(db, sport_key: str = "football", years: int = 2) -> DixonColes:
     """
-    Fit a Dixon-Coles model from all finished football matches in the DB.
+    Fit a Dixon-Coles model from the last `years` years of finished matches.
+    Rolling window prevents stale team ratings from diluting recent form.
     Returns the fitted model (not persisted — caller may cache it).
     """
     from data.db_models.models import Match, Competition, Sport, Participant
     from sqlalchemy.orm import joinedload
+    from datetime import datetime, timedelta
 
     sport = db.query(Sport).filter_by(key=sport_key).first()
     if not sport:
         return DixonColes()
 
+    cutoff = datetime.utcnow() - timedelta(days=365 * years)
+
     matches = (
         db.query(Match)
         .join(Competition)
-        .filter(Competition.sport_id == sport.id, Match.result.isnot(None))
+        .filter(
+            Competition.sport_id == sport.id,
+            Match.result.isnot(None),
+            Match.match_date >= cutoff,
+        )
         .options(joinedload(Match.home), joinedload(Match.away))
         .order_by(Match.match_date)
         .all()

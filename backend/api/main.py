@@ -18,6 +18,7 @@ from api.routes.standings import router as standings_router
 from api.routes.teams import teams_router, players_router
 from api.routes.analytics import router as analytics_router
 from api.routes.sports_data import router as sports_data_router
+from api.routes.search import router as search_router
 
 settings = get_settings()
 
@@ -48,17 +49,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Initial data fetch error: {e}")
 
-    # Auto-train models if not present
-    try:
-        _auto_train()
-    except Exception as e:
-        logger.error(f"Auto-train error: {e}")
-
-    # Auto-predict upcoming
-    try:
-        _auto_predict()
-    except Exception as e:
-        logger.error(f"Auto-predict error: {e}")
+    # Auto-train + auto-predict in background — never block server startup
+    asyncio.get_event_loop().run_in_executor(None, _auto_train_and_predict_safe)
 
     # Register event loop for the live scores event bus
     try:
@@ -93,25 +85,37 @@ def _auto_train():
     from ml.models.sport_model import SportModel, MODEL_DIR
     from features.engineering import build_training_matrix
     from data.database import get_sync_session
+    import ml.training_progress as tp
 
-    for sport_key in [
+    sport_keys = [
         "football", "basketball", "tennis", "baseball",
         "american_football", "ice_hockey", "cricket", "rugby",
         "handball", "volleyball",
-    ]:
-        model_path = MODEL_DIR / f"{sport_key}_model.pkl"
-        if model_path.exists():
-            continue
-        logger.info(f"Training model for {sport_key}...")
-        with get_sync_session() as db:
-            df = build_training_matrix(db, sport_key)
-        if df.empty:
-            logger.warning(f"No training data for {sport_key}")
-            continue
-        model = SportModel(sport_key)
-        model.train(df)
-        model.save()
-        logger.info(f"Model trained for {sport_key}")
+    ]
+
+    tp.start_training()
+    try:
+        for sport_key in sport_keys:
+            model_path = MODEL_DIR / f"{sport_key}_model.pkl"
+            if model_path.exists():
+                tp.sport_done(sport_key, accuracy=None, skipped=True)
+                continue
+            logger.info(f"Training model for {sport_key}...")
+            with get_sync_session() as db:
+                df = build_training_matrix(db, sport_key)
+            if df.empty:
+                logger.warning(f"No training data for {sport_key}")
+                tp.sport_done(sport_key, accuracy=None, skipped=True)
+                continue
+            tp.sport_started(sport_key, rows=len(df))
+            model = SportModel(sport_key)
+            scores = model.train(df, market_callback=lambda m: tp.market_done(sport_key, m))
+            model.save()
+            accuracy = scores.get("result")
+            tp.sport_done(sport_key, accuracy=accuracy)
+            logger.info(f"Model trained for {sport_key}")
+    finally:
+        tp.finish_training()
 
 
 def _auto_predict():
@@ -159,6 +163,17 @@ def _auto_predict():
                 logger.debug(f"Prediction error match {m.id}: {e}")
 
     logger.info("Auto-predict complete.")
+
+
+def _auto_train_and_predict_safe():
+    try:
+        _auto_train()
+    except Exception as e:
+        logger.error(f"Auto-train background error: {e}")
+    try:
+        _auto_predict()
+    except Exception as e:
+        logger.error(f"Auto-predict background error: {e}")
 
 
 def _auto_decisions_safe():
@@ -211,6 +226,7 @@ app.include_router(teams_router,    prefix="/api/v1")
 app.include_router(players_router,  prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 app.include_router(sports_data_router, prefix="/api/v1")
+app.include_router(search_router,     prefix="/api/v1")
 
 
 @app.get("/api/v1/health")
@@ -221,4 +237,15 @@ async def health():
 # Serve React frontend in production
 frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
 if frontend_dist.exists():
-    app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="static")
+    # Serve static assets (JS, CSS, images) directly
+    app.mount("/assets", StaticFiles(directory=str(frontend_dist / "assets")), name="assets")
+
+    # SPA catch-all: serve index.html for every non-API route so React Router works
+    from fastapi.responses import FileResponse
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        file_path = frontend_dist / full_path
+        if file_path.is_file():
+            return FileResponse(str(file_path))
+        return FileResponse(str(frontend_dist / "index.html"))

@@ -5,8 +5,9 @@ import { fetchSports, fetchValueBets } from "../api/client";
 import SportTabs from "../components/SportTabs";
 import Spinner from "../components/Spinner";
 import { formatDate, outcomeLabel, confidenceColor } from "../utils/format";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import type { ValueBet } from "../api/types";
+import { getCompetitionSlug } from "../utils/competitionSlug";
 
 export default function ValueBetsPage() {
   const [sport, setSport] = useState("all");
@@ -86,13 +87,22 @@ export default function ValueBetsPage() {
 }
 
 function ValueBetCard({ bet }: { bet: ValueBet }) {
+  const navigate = useNavigate();
+  const slug = getCompetitionSlug(bet.competition ?? "");
   return (
     <Link to={`/match/${bet.match_id}`}>
       <div className="card p-4 border-yellow-500/30 hover:border-yellow-500/60 transition-all">
         {/* Sport + competition */}
         <div className="flex items-center gap-2 text-xs text-slate-500 mb-2">
           <span>{bet.sport_icon}</span>
-          <span className="truncate">{bet.competition}</span>
+          {slug ? (
+            <button
+              className="truncate hover:text-pi-sky transition-colors"
+              onClick={e => { e.preventDefault(); e.stopPropagation(); navigate(`/tables?slug=${slug}`); }}
+            >{bet.competition}</button>
+          ) : (
+            <span className="truncate">{bet.competition}</span>
+          )}
           <span className="ml-auto shrink-0">{formatDate(bet.match_date)}</span>
         </div>
 

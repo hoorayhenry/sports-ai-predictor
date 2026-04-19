@@ -214,25 +214,36 @@ async def all_decisions(
 
 @router.get("/smart-sets")
 async def smart_sets(
-    date_str: Optional[str] = Query(None, description="YYYY-MM-DD, default=today"),
+    sport: Optional[str] = Query(None, description="Filter by sport key, e.g. 'football'"),
     db: AsyncSession = Depends(get_async_session),
 ):
-    """Return the 10 Smart Sets generated for a given date."""
-    if date_str:
-        try:
-            target = datetime.strptime(date_str, "%Y-%m-%d")
-        except ValueError:
-            from fastapi import HTTPException
-            raise HTTPException(400, "Invalid date format. Use YYYY-MM-DD")
-    else:
-        target = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    """
+    Return all active Smart Sets (window_end in the future or within last 24h).
+    Grouped by window_label + sport_key so the frontend can render per-window sections.
+    """
+    # Include sets whose window ends within the last 24h (recently finished window)
+    cutoff = datetime.utcnow() - timedelta(hours=24)
 
-    result = await db.execute(
+    q = (
         select(SmartSet)
-        .where(SmartSet.generated_date >= target)
-        .order_by(SmartSet.set_number)
+        .where(SmartSet.window_end >= cutoff)
+        .order_by(SmartSet.window_start, SmartSet.sport_key, SmartSet.set_number)
     )
+    # Fall back to today-generated sets if no windowed sets exist yet
+    result = await db.execute(q)
     sets = result.scalars().all()
+
+    if not sets:
+        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        result = await db.execute(
+            select(SmartSet)
+            .where(SmartSet.generated_date >= today)
+            .order_by(SmartSet.set_number)
+        )
+        sets = result.scalars().all()
+
+    if sport:
+        sets = [s for s in sets if s.sport_key == sport]
 
     out = []
     for ss in sets:
@@ -241,6 +252,10 @@ async def smart_sets(
             "id":                   ss.id,
             "set_number":           ss.set_number,
             "generated_date":       ss.generated_date.isoformat(),
+            "window_label":         ss.window_label,
+            "window_start":         ss.window_start.isoformat() if ss.window_start else None,
+            "window_end":           ss.window_end.isoformat() if ss.window_end else None,
+            "sport_key":            ss.sport_key or "football",
             "match_count":          ss.match_count,
             "overall_confidence":   ss.overall_confidence,
             "combined_probability": ss.combined_probability,
@@ -564,9 +579,12 @@ async def run_decisions_now(
         from scheduler import _get_daily_picks_dicts, _get_smart_sets_dicts
         from mailer.daily_email import send_daily_email
 
+        from datetime import datetime as _dt, timedelta as _td
+        # Use next 7 days as default window for manual trigger
+        _now = _dt.utcnow()
         with get_sync_session() as db:
             play_count = process_decisions(db)
-            sets       = generate_smart_sets(db)
+            sets       = generate_smart_sets(db, _now, _now + _td(days=7))
             if send_email_:
                 picks  = _get_daily_picks_dicts(db)
                 sets_d = _get_smart_sets_dicts(db)

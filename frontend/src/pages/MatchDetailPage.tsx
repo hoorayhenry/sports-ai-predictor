@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Zap, TrendingUp, Target, Shield } from "lucide-react";
 import { fetchMatch } from "../api/client";
 import Spinner from "../components/Spinner";
 import { formatDate, outcomeLabel, confidenceColor, resultLabel } from "../utils/format";
+import { getCompetitionSlug } from "../utils/competitionSlug";
 import type { Odds, PredictionMarkets, PredictionValueBet } from "../api/types";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -175,6 +176,7 @@ type Tab = "overview" | "markets" | "scores";
 
 export default function MatchDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const [tab, setTab] = useState<Tab>("overview");
 
   const { data: match, isLoading } = useQuery({
@@ -206,12 +208,23 @@ export default function MatchDetailPage() {
   const bttsOdds = match.odds.filter((o) => o.market === "btts");
   const valueBets = m?.value_bets ?? [];
   const topScores = m?.top_correct_scores ?? [];
+  const isFootball = match.sport === "football";
+  const isBasketball = match.sport === "basketball";
   const hasAdvanced = m && (
     m.double_chance_1x != null ||
     m.dnb_home != null ||
     m.home_win_to_nil != null ||
     m.home_clean_sheet != null
   );
+
+  // Sport-specific totals labelling
+  const totalsUnit =
+    isBasketball ? "Points" :
+    match.sport === "baseball" ? "Runs" :
+    match.sport === "american_football" ? "Points" :
+    match.sport === "ice_hockey" ? "Goals" :
+    "Goals";
+  const overMainData = m?.over_main;
 
   const TABS: { key: Tab; label: string }[] = [
     { key: "overview", label: "Overview" },
@@ -223,12 +236,20 @@ export default function MatchDetailPage() {
     <div className="min-h-screen pb-20 md:pb-6">
       {/* Top bar */}
       <div className="sticky top-0 z-10 navbar-glass px-4 py-3 flex items-center gap-3">
-        <Link to="/" className="text-slate-400 hover:text-white transition-colors">
+        <button onClick={() => navigate(-1)} className="text-slate-400 hover:text-white transition-colors shrink-0">
           <ArrowLeft size={20} />
-        </Link>
+        </button>
         <div className="min-w-0">
           <p className="text-xs text-slate-500 truncate">
-            {match.sport_icon} {match.competition}
+            {match.sport_icon}{" "}
+            {(() => {
+              const slug = getCompetitionSlug(match.competition);
+              return slug ? (
+                <Link to={`/tables?slug=${slug}`} className="hover:text-pi-sky transition-colors">
+                  {match.competition}
+                </Link>
+              ) : match.competition;
+            })()}
           </p>
           <p className="text-sm font-semibold truncate">
             {match.home_team} vs {match.away_team}
@@ -262,8 +283,8 @@ export default function MatchDetailPage() {
             </div>
           </div>
 
-          {/* xG row */}
-          {m && (m.exp_home_goals != null || m.exp_away_goals != null) && (
+          {/* xG row — football only */}
+          {isFootball && m && (m.exp_home_goals != null || m.exp_away_goals != null) && (
             <div className="flex justify-between items-center mt-4 px-2">
               <div className="text-left">
                 <p className="text-xs text-slate-500">xG</p>
@@ -322,20 +343,37 @@ export default function MatchDetailPage() {
                 </div>
               )}
 
-              {/* Goals markets grid */}
+              {/* Totals markets grid — sport-adaptive */}
               <div className="grid grid-cols-2 gap-3 mb-4">
-                {m?.over15 && (
-                  <StatTile label="Over 1.5 Goals" value={m.over15.over} bar color="indigo" />
-                )}
-                {pred.over25_prob != null && (
-                  <StatTile label="Over 2.5 Goals" value={pred.over25_prob} bar color="purple" />
-                )}
-                {m?.over35 && (
-                  <StatTile label="Over 3.5 Goals" value={m.over35.over} bar color="pink" />
-                )}
-                {pred.btts_prob != null && (
-                  <StatTile label="Both Teams Score" value={pred.btts_prob} bar color="green" />
-                )}
+                {isFootball ? (
+                  <>
+                    {m?.over15 && (
+                      <StatTile label="Over 1.5 Goals" value={m.over15.over} bar color="indigo" />
+                    )}
+                    {pred.over25_prob != null && (
+                      <StatTile label="Over 2.5 Goals" value={pred.over25_prob} bar color="purple" />
+                    )}
+                    {m?.over35 && (
+                      <StatTile label="Over 3.5 Goals" value={m.over35.over} bar color="pink" />
+                    )}
+                    {pred.btts_prob != null && (
+                      <StatTile label="Both Teams Score" value={pred.btts_prob} bar color="green" />
+                    )}
+                  </>
+                ) : overMainData ? (
+                  <>
+                    <StatTile
+                      label={`Over ${overMainData.line} ${totalsUnit}`}
+                      value={overMainData.over}
+                      bar color="purple"
+                    />
+                    <StatTile
+                      label={`Under ${overMainData.line} ${totalsUnit}`}
+                      value={overMainData.under}
+                      bar color="orange"
+                    />
+                  </>
+                ) : null}
               </div>
 
               {/* Top value bet */}
@@ -544,8 +582,19 @@ export default function MatchDetailPage() {
               </div>
             )}
 
+            {/* For non-football sports, show over_main summary if no advanced markets */}
+            {!isFootball && overMainData && (
+              <div className="card p-4">
+                <SectionHeader icon={<TrendingUp size={14} />} title={`Total ${totalsUnit}`} />
+                <div className="grid grid-cols-2 gap-3">
+                  <StatTile label={`Over ${overMainData.line}`} value={overMainData.over} bar color="purple" />
+                  <StatTile label={`Under ${overMainData.line}`} value={overMainData.under} bar color="orange" />
+                </div>
+              </div>
+            )}
+
             {/* Fallback when no advanced data yet */}
-            {!hasAdvanced && (
+            {!hasAdvanced && !overMainData && (
               <div className="card p-6 text-center text-slate-500 text-sm">
                 Advanced market data will appear after the model runs for this match.
               </div>

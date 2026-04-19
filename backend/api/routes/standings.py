@@ -47,6 +47,7 @@ LEAGUES = [
     ("bra.1",            "Brasileirão",       "Brazil",       "🇧🇷"),
     ("arg.1",            "Liga Profesional",  "Argentina",    "🇦🇷"),
     ("col.1",            "Liga BetPlay",      "Colombia",     "🇨🇴"),
+    ("mex.1",            "Liga MX",           "Mexico",       "🇲🇽"),
     ("uefa.champions",   "Champions League",  "Europe",       "⭐"),
     ("uefa.europa",      "Europa League",     "Europe",       "🟠"),
     ("uefa.europa.conf", "Conference League", "Europe",       "🔵"),

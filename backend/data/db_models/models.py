@@ -207,11 +207,23 @@ class MatchDecision(Base):
 
 
 class SmartSet(Base):
-    """A curated set of 10 matches generated daily by the AI."""
+    """
+    A curated set of picks generated on a rolling 3-window schedule:
+      Sun 17:00 WAT → Mon–Wed matches
+      Wed 17:00 WAT → Thu–Fri matches
+      Fri 17:00 WAT → Sat–Sun matches
+    Football gets 10×10; other sports get flexible sets.
+    """
     __tablename__ = "smart_sets"
     id: Mapped[int] = mapped_column(primary_key=True)
-    set_number: Mapped[int] = mapped_column(Integer)          # 1-10
+    set_number: Mapped[int] = mapped_column(Integer)          # 1-10 for football, 1-N for others
     generated_date: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+    # Window this set covers
+    window_label: Mapped[Optional[str]] = mapped_column(String(40))   # e.g. "Mon–Wed · Apr 21–23"
+    window_start: Mapped[Optional[datetime]] = mapped_column(DateTime, index=True)
+    window_end: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    sport_key: Mapped[Optional[str]] = mapped_column(String(32), default="football")
 
     # Matches stored as JSON
     matches_json: Mapped[str] = mapped_column(Text)           # [{match_id, ...}, ...]
@@ -232,7 +244,7 @@ class SmartSet(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (
-        UniqueConstraint("set_number", "generated_date"),
+        UniqueConstraint("set_number", "sport_key", "window_start"),
     )
 
 

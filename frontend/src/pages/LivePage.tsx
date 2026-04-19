@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { Link } from "react-router-dom";
 import { RefreshCw, Wifi, WifiOff } from "lucide-react";
 import Spinner from "../components/Spinner";
+import { getCompetitionSlug } from "../utils/competitionSlug";
 import type { Match } from "../api/types";
 
 const SSE_URL = `${import.meta.env.VITE_API_URL ?? "http://localhost:8000/api/v1"}/matches/live/stream`;
@@ -27,6 +29,7 @@ function LiveRow({ match, prev }: { match: Match; prev?: Match }) {
     (prev.home_score !== match.home_score || prev.away_score !== match.away_score);
 
   return (
+    <Link to={`/match/${match.id}`} className="block">
     <div
       className={`grid grid-cols-[1fr_auto_3rem_auto_1fr] gap-1 items-center px-4 py-3 border-b border-pi-border/15 transition-colors ${
         isLive(match) ? "hover:bg-pi-emerald/4" : "hover:bg-white/2"
@@ -73,6 +76,7 @@ function LiveRow({ match, prev }: { match: Match; prev?: Match }) {
         </span>
       </div>
     </div>
+    </Link>
   );
 }
 
@@ -86,6 +90,7 @@ function CompetitionBlock({
   prevMatches: Match[];
 }) {
   const liveCount = matches.filter((m) => m.live_minute != null).length;
+  const slug = getCompetitionSlug(competition);
 
   return (
     <div className="card overflow-hidden mb-3">
@@ -97,9 +102,18 @@ function CompetitionBlock({
               {country}
             </p>
           )}
-          <p className="text-sm font-semibold text-pi-primary font-display tracking-wide leading-tight">
-            {competition}
-          </p>
+          {slug ? (
+            <Link
+              to={`/tables?slug=${slug}`}
+              className="text-sm font-semibold text-pi-primary font-display tracking-wide leading-tight hover:text-pi-sky transition-colors"
+            >
+              {competition}
+            </Link>
+          ) : (
+            <p className="text-sm font-semibold text-pi-primary font-display tracking-wide leading-tight">
+              {competition}
+            </p>
+          )}
         </div>
         {liveCount > 0 && (
           <span className="flex items-center gap-1.5 text-[10px] font-bold text-pi-emerald uppercase tracking-wider">

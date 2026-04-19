@@ -8,7 +8,8 @@ import {
 import { fetchDailyPicks, fetchSports, triggerDecisionsNow } from "../api/client";
 import SportTabs from "../components/SportTabs";
 import Spinner from "../components/Spinner";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { getCompetitionSlug } from "../utils/competitionSlug";
 import type { MatchDecision } from "../api/types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -51,12 +52,17 @@ function StatTile({ icon, label, value, sub }: {
   icon: React.ReactNode; label: string; value: string | number; sub?: string;
 }) {
   return (
-    <div className="flex items-center gap-2.5 bg-white/[0.035] border border-white/[0.06] rounded-xl px-3.5 py-2.5 min-w-0">
-      <div className="text-pi-muted/50 shrink-0">{icon}</div>
+    <div className="flex items-center gap-2.5 rounded-xl px-3.5 py-2.5 min-w-0"
+      style={{
+        background: "linear-gradient(145deg, rgba(28,40,76,0.98) 0%, rgba(18,28,58,0.98) 100%)",
+        border: "1px solid rgba(99,120,210,0.48)",
+        boxShadow: "0 2px 14px rgba(0,0,0,0.45), 0 1px 0 rgba(255,255,255,0.07) inset",
+      }}>
+      <div className="text-slate-400 shrink-0">{icon}</div>
       <div className="min-w-0">
-        <p className="text-[9px] font-bold uppercase tracking-[0.18em] text-pi-muted/50 mb-0.5 whitespace-nowrap">{label}</p>
-        <p className="text-[15px] font-extrabold text-pi-primary font-display tabular-nums leading-none">{value}</p>
-        {sub && <p className="text-[9px] text-pi-muted/40 mt-0.5">{sub}</p>}
+        <p className="text-[9px] font-bold uppercase tracking-[0.18em] text-slate-400 mb-0.5 whitespace-nowrap">{label}</p>
+        <p className="text-[15px] font-extrabold text-white font-display tabular-nums leading-none">{value}</p>
+        {sub && <p className="text-[9px] text-slate-400 mt-0.5">{sub}</p>}
       </div>
     </div>
   );
@@ -159,7 +165,7 @@ function ScoreBreakdown({ breakdown }: { breakdown: MatchDecision["score_breakdo
       {items.map(({ label, val, max, color }) => (
         <div key={label}>
           <div className="flex justify-between items-baseline mb-1">
-            <span className="text-[9px] text-pi-muted/50 font-semibold uppercase tracking-wider">{label}</span>
+            <span className="text-[9px] text-slate-400 font-semibold uppercase tracking-wider">{label}</span>
             <span className="text-[10px] font-bold tabular-nums" style={{ color }}>{val.toFixed(0)}</span>
           </div>
           <div className="h-[3px] bg-white/5 rounded-full overflow-hidden">
@@ -178,6 +184,7 @@ function ScoreBreakdown({ breakdown }: { breakdown: MatchDecision["score_breakdo
 
 function SignalCard({ pick }: { pick: MatchDecision }) {
   const [expanded, setExpanded] = useState(false);
+  const navigate = useNavigate();
 
   const conf    = Math.round(pick.confidence_score);
   const outcome = outcomeLabel(pick.predicted_outcome);
@@ -207,9 +214,21 @@ function SignalCard({ pick }: { pick: MatchDecision }) {
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/[0.05] bg-white/[0.015]">
           <div className="flex items-center gap-2 min-w-0">
             <span className="text-sm leading-none shrink-0">{pick.sport_icon}</span>
-            <span className="text-[10px] font-bold uppercase tracking-[0.15em] text-pi-muted/60 truncate">
-              {pick.competition}
-            </span>
+            {(() => {
+              const slug = getCompetitionSlug(pick.competition ?? "");
+              return slug ? (
+                <button
+                  className="text-[10px] font-bold uppercase tracking-[0.15em] text-pi-muted/60 truncate hover:text-pi-sky transition-colors"
+                  onClick={e => { e.preventDefault(); e.stopPropagation(); navigate(`/tables?slug=${slug}`); }}
+                >
+                  {pick.competition}
+                </button>
+              ) : (
+                <span className="text-[10px] font-bold uppercase tracking-[0.15em] text-pi-muted/60 truncate">
+                  {pick.competition}
+                </span>
+              );
+            })()}
           </div>
           <div className="flex items-center gap-3 shrink-0 ml-2">
             {/* Strong Signal badge */}
@@ -391,9 +410,17 @@ export default function DailyPicksPage() {
     staleTime: 30_000,
   });
 
+  const [runMsg, setRunMsg] = useState<string | null>(null);
+
   const runNow = useMutation({
     mutationFn: () => triggerDecisionsNow(false),
-    onSuccess:  () => setTimeout(() => refetch(), 3000),
+    onSuccess: () => {
+      setRunMsg("Running… picks update in ~15s");
+      // Poll at 8s, 15s, 25s — background job takes 10-30s
+      [8000, 15000, 25000].forEach(ms => setTimeout(() => refetch(), ms));
+      setTimeout(() => setRunMsg(null), 28000);
+    },
+    onError: () => setRunMsg("Failed to trigger — check backend logs"),
   });
 
   const picks: MatchDecision[] = data?.picks ?? [];
@@ -449,14 +476,19 @@ export default function DailyPicksPage() {
               </h1>
             </div>
 
-            <button
-              onClick={() => runNow.mutate()}
-              disabled={runNow.isPending}
-              className="btn-ghost flex items-center gap-1.5 shrink-0 backdrop-blur-sm mt-1"
-            >
-              <RefreshCw size={12} className={runNow.isPending ? "animate-spin" : ""} />
-              {runNow.isPending ? "Running…" : "Refresh"}
-            </button>
+            <div className="flex flex-col items-end gap-1">
+              <button
+                onClick={() => runNow.mutate()}
+                disabled={runNow.isPending}
+                className="btn-ghost flex items-center gap-1.5 shrink-0 backdrop-blur-sm mt-1"
+              >
+                <RefreshCw size={12} className={runNow.isPending ? "animate-spin" : ""} />
+                {runNow.isPending ? "Running…" : "Refresh"}
+              </button>
+              {runMsg && (
+                <span className="text-[10px] text-emerald-400/80 animate-pulse">{runMsg}</span>
+              )}
+            </div>
           </div>
 
           {/* Stats tiles */}

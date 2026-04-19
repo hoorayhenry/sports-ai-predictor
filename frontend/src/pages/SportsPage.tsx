@@ -272,7 +272,7 @@ function FixtureRow({ f }: { f: FixtureItem }) {
   );
 }
 
-function StandingsTable({ rows, sport }: { rows: UnifiedRow[]; sport: SportConfig }) {
+function StandingsTable({ rows, sport, slug, isEspn }: { rows: UnifiedRow[]; sport: SportConfig; slug?: string; isEspn?: boolean }) {
   const sl = sport.statLabels;
   const wlMode = !sport.hasDraw && ["basketball","american_football","baseball","ice_hockey"].includes(sport.key);
   return (
@@ -294,15 +294,26 @@ function StandingsTable({ rows, sport }: { rows: UnifiedRow[]; sport: SportConfi
           </tr>
         </thead>
         <tbody>
-          {rows.map(row => (
-            <tr key={row.rank} className="border-b border-pi-border/8 hover:bg-white/[0.02] transition-colors relative">
+          {rows.map(row => {
+            const canLink = !!row.team_id && (isEspn ? !!slug : true);
+            const trClass = `border-b border-pi-border/8 hover:bg-white/[0.02] transition-colors relative group ${canLink ? "cursor-pointer" : ""}`;
+            const teamCell = (
+              <div className="flex items-center gap-2 min-w-0">
+                <TeamLogo id={row.team_id} logo={row.team_logo} name={row.team_name} />
+                <span className={`font-medium text-pi-primary truncate ${canLink ? "group-hover:text-pi-indigo-light transition-colors" : ""}`}>
+                  {row.team_name}
+                </span>
+                {canLink && <ChevronRight size={11} className="text-pi-muted/0 group-hover:text-pi-muted/50 transition-colors shrink-0" />}
+              </div>
+            );
+            return (
+            <tr key={row.rank} className={trClass}>
               <QualBand desc={row.description} />
               <td className="py-2.5 pl-4 pr-2 text-pi-muted text-center font-mono text-xs">{row.rank}</td>
               <td className="py-2.5 px-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  <TeamLogo id={row.team_id} logo={row.team_logo} name={row.team_name} />
-                  <span className="font-medium text-pi-primary truncate">{row.team_name}</span>
-                </div>
+                {canLink ? (
+                  <Link to={isEspn ? `/team/${slug}/${row.team_id}` : `/team/ss/${row.team_id}`} className="block">{teamCell}</Link>
+                ) : teamCell}
               </td>
               <td className="py-2.5 px-2 text-center text-pi-secondary">{row.played}</td>
               <td className="py-2.5 px-2 text-center text-pi-secondary">{row.win}</td>
@@ -321,7 +332,8 @@ function StandingsTable({ rows, sport }: { rows: UnifiedRow[]; sport: SportConfi
                 {wlMode ? (row.pct !== undefined ? row.pct.toFixed(3) : row.win) : row.points}
               </td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -910,7 +922,7 @@ export default function SportsPage() {
                 {standingsGroups.length > 1 && (
                   <p className="text-[10px] font-bold uppercase tracking-widest text-pi-muted/50 px-4 py-2">{g.name}</p>
                 )}
-                <StandingsTable rows={g.rows} sport={sport} />
+                <StandingsTable rows={g.rows} sport={sport} slug={espnSlug} isEspn={isEspn} />
               </div>
             ))}
           </div>
@@ -1011,13 +1023,15 @@ export default function SportsPage() {
                 : (
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
                     {teams.map(t => (
-                      <div key={t.id} className="card flex items-center gap-3">
+                      <Link key={t.id} to={`/team/ss/${t.id}`}
+                        className="card flex items-center gap-3 hover:border-pi-indigo/30 transition-all">
                         <TeamLogo id={t.id} logo={t.logo} name={t.name} size="w-10 h-10" />
-                        <div className="min-w-0">
+                        <div className="min-w-0 flex-1">
                           <p className="text-[13px] font-semibold text-pi-primary truncate">{t.name}</p>
                           {t.country && <p className="text-[11px] text-pi-muted">{t.country}</p>}
                         </div>
-                      </div>
+                        <ChevronRight size={13} className="text-pi-muted shrink-0" />
+                      </Link>
                     ))}
                   </div>
                 );
@@ -1038,20 +1052,33 @@ export default function SportsPage() {
                   <Star size={13} className="text-amber-400" />{cat.name}
                 </h3>
                 <div className="card divide-y divide-pi-border/10">
-                  {cat.leaders.slice(0, 10).map(p => (
-                    <div key={p.player_id} className="flex items-center gap-3 px-4 py-3">
-                      <span className="text-[11px] font-mono text-pi-muted w-5 text-center shrink-0">{p.rank}</span>
-                      <PlayerHead id={p.player_id} src={p.headshot} name={p.name} />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-[13px] font-semibold text-pi-primary truncate">{p.name}</p>
-                        <div className="flex items-center gap-1.5 mt-0.5">
-                          <TeamLogo id={p.team_id} logo={p.team_logo} name={p.team_name} size="w-4 h-4" />
-                          <span className="text-[11px] text-pi-muted truncate">{p.team_name}</span>
+                  {cat.leaders.slice(0, 10).map(p => {
+                    const inner = (
+                      <>
+                        <span className="text-[11px] font-mono text-pi-muted w-5 text-center shrink-0">{p.rank}</span>
+                        <PlayerHead id={p.player_id} src={p.headshot} name={p.name} />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-[13px] font-semibold text-pi-primary truncate group-hover:text-pi-indigo-light transition-colors">{p.name}</p>
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            <TeamLogo id={p.team_id} logo={p.team_logo} name={p.team_name} size="w-4 h-4" />
+                            <span className="text-[11px] text-pi-muted truncate">{p.team_name}</span>
+                          </div>
                         </div>
+                        <span className="text-lg font-bold text-pi-primary shrink-0">{p.display}</span>
+                        {p.player_id && <ChevronRight size={13} className="text-pi-muted/0 group-hover:text-pi-muted/50 transition-colors shrink-0" />}
+                      </>
+                    );
+                    return p.player_id ? (
+                      <Link key={p.player_id} to={isEspn ? `/player/soccer/${p.player_id}` : `/player/ss/${p.player_id}`}
+                        className="flex items-center gap-3 px-4 py-3 hover:bg-white/[0.04] transition-colors group">
+                        {inner}
+                      </Link>
+                    ) : (
+                      <div key={`${p.name}-${p.rank}`} className="flex items-center gap-3 px-4 py-3 opacity-70">
+                        {inner}
                       </div>
-                      <span className="text-lg font-bold text-pi-primary shrink-0">{p.display}</span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             ))}

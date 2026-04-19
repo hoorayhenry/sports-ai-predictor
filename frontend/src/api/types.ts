@@ -35,6 +35,7 @@ export interface PredictionMarkets {
   over15?: { over: number; under: number };
   over25?: { over: number; under: number };
   over35?: { over: number; under: number };
+  over_main?: { over: number; under: number; line: string }; // non-football sport-specific line
   btts?: { yes: number; no: number };
   home_cs?: { yes: number; no: number };
   away_cs?: { yes: number; no: number };
@@ -188,6 +189,10 @@ export interface SmartSet {
   id: number;
   set_number: number;
   generated_date: string;
+  window_label: string | null;
+  window_start: string | null;
+  window_end: string | null;
+  sport_key: string;
   match_count: number;
   overall_confidence: number;
   combined_probability: number;

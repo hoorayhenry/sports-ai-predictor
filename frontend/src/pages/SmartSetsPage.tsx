@@ -1,27 +1,110 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Target, ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
+import { Target, ChevronDown, ChevronUp, RefreshCw, Calendar } from "lucide-react";
 import { fetchSmartSets, triggerDecisionsNow } from "../api/client";
 import Spinner from "../components/Spinner";
-import { formatDate, outcomeShort } from "../utils/format";
+import { outcomeShort } from "../utils/format";
 import type { SmartSet, SmartSetMatch } from "../api/types";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { getCompetitionSlug } from "../utils/competitionSlug";
+
+// ── Timezone helpers ──────────────────────────────────────────────────────────
+
+/** Format a UTC ISO date string in the *user's local timezone*. */
+function localMatchTime(isoDate: string): string {
+  const d = new Date(isoDate);
+  return d.toLocaleString(undefined, {
+    weekday: "short",
+    month:   "short",
+    day:     "numeric",
+    hour:    "2-digit",
+    minute:  "2-digit",
+  });
+}
+
+// ── Sport display ─────────────────────────────────────────────────────────────
+
+const SPORT_ICONS: Record<string, string> = {
+  football:         "⚽",
+  basketball:       "🏀",
+  tennis:           "🎾",
+  american_football:"🏈",
+  ice_hockey:       "🏒",
+  baseball:         "⚾",
+  cricket:          "🏏",
+  rugby:            "🏉",
+  handball:         "🤾",
+  volleyball:       "🏐",
+};
+
+const SPORT_LABELS: Record<string, string> = {
+  football:          "Football",
+  basketball:        "Basketball",
+  tennis:            "Tennis",
+  american_football: "American Football",
+  ice_hockey:        "Ice Hockey",
+  baseball:          "Baseball",
+  cricket:           "Cricket",
+  rugby:             "Rugby",
+  handball:          "Handball",
+  volleyball:        "Volleyball",
+};
+
+// ── Grouping helpers ──────────────────────────────────────────────────────────
+
+interface WindowGroup {
+  label:     string;
+  sportKey:  string;
+  sets:      SmartSet[];
+  windowEnd: string | null;
+}
+
+function groupSets(sets: SmartSet[]): WindowGroup[] {
+  const map = new Map<string, WindowGroup>();
+  for (const s of sets) {
+    const label    = s.window_label ?? "Current Picks";
+    const sportKey = s.sport_key   ?? "football";
+    const key      = `${label}::${sportKey}`;
+    if (!map.has(key)) {
+      map.set(key, { label, sportKey, sets: [], windowEnd: s.window_end });
+    }
+    map.get(key)!.sets.push(s);
+  }
+  // Sort windows by window_start, then football first within a window
+  return [...map.values()].sort((a, b) => {
+    const aStart = a.sets[0]?.window_start ?? "";
+    const bStart = b.sets[0]?.window_start ?? "";
+    if (aStart !== bStart) return aStart < bStart ? -1 : 1;
+    if (a.sportKey === "football") return -1;
+    if (b.sportKey === "football") return 1;
+    return a.sportKey.localeCompare(b.sportKey);
+  });
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function SmartSetsPage() {
   const { data: sets = [], isLoading, refetch } = useQuery({
     queryKey: ["smart-sets"],
-    queryFn: () => fetchSmartSets(),
+    queryFn:  () => fetchSmartSets(),
     staleTime: 60_000,
   });
 
+  const [runMsg, setRunMsg] = useState<string | null>(null);
+
   const runNow = useMutation({
     mutationFn: () => triggerDecisionsNow(false),
-    onSuccess: () => setTimeout(() => refetch(), 3000),
+    onSuccess:  () => {
+      setRunMsg("Regenerating… sets update in ~15s");
+      [8000, 15000, 25000].forEach(ms => setTimeout(() => refetch(), ms));
+      setTimeout(() => setRunMsg(null), 28000);
+    },
+    onError: () => setRunMsg("Failed — check backend logs"),
   });
 
-  const playCount = sets.reduce(
-    (s, set) => s + set.matches.filter((m) => m.ai_decision === "PLAY").length,
-    0
+  const groups   = groupSets(sets);
+  const totalPlay = sets.reduce(
+    (s, set) => s + set.matches.filter((m) => m.ai_decision === "PLAY").length, 0
   );
 
   return (
@@ -34,27 +117,34 @@ export default function SmartSetsPage() {
           </div>
           <div>
             <h2 className="text-xl font-bold text-pi-primary font-display">Smart Sets</h2>
-            <p className="text-xs text-pi-secondary">10 curated 10-match packages for today</p>
+            <p className="text-xs text-pi-secondary">
+              AI-curated picks · match times in your timezone
+            </p>
           </div>
         </div>
-        <button
-          onClick={() => runNow.mutate()}
-          disabled={runNow.isPending}
-          className="btn-ghost flex items-center gap-1.5"
-        >
-          <RefreshCw size={13} className={runNow.isPending ? "animate-spin" : ""} />
-          Regenerate
-        </button>
+        <div className="flex flex-col items-end gap-1">
+          <button
+            onClick={() => runNow.mutate()}
+            disabled={runNow.isPending}
+            className="btn-ghost flex items-center gap-1.5"
+          >
+            <RefreshCw size={13} className={runNow.isPending ? "animate-spin" : ""} />
+            Regenerate
+          </button>
+          {runMsg && (
+            <span className="text-[10px] text-pi-violet/80 animate-pulse">{runMsg}</span>
+          )}
+        </div>
       </div>
 
       {/* Summary strip */}
       {sets.length > 0 && (
         <div className="flex gap-3 mb-4 mt-4">
-          <StatPill label="Sets" value={sets.length} />
-          <StatPill label="Plays" value={playCount} color="text-pi-emerald" />
+          <StatPill label="Sets"  value={sets.length} />
+          <StatPill label="Plays" value={totalPlay}    color="text-pi-emerald" />
           <StatPill
             label="Avg conf"
-            value={`${(sets.reduce((s, x) => s + x.overall_confidence, 0) / sets.length).toFixed(0)}`}
+            value={`${(sets.reduce((s, x) => s + x.overall_confidence, 0) / sets.length).toFixed(0)}%`}
             color="text-pi-sky"
           />
         </div>
@@ -62,7 +152,7 @@ export default function SmartSetsPage() {
 
       {isLoading ? (
         <div className="flex justify-center py-20"><Spinner size={40} /></div>
-      ) : sets.length === 0 ? (
+      ) : groups.length === 0 ? (
         <div className="text-center py-20 text-pi-muted">
           <p className="text-5xl mb-4">🎯</p>
           <p>No Smart Sets generated yet.</p>
@@ -71,9 +161,9 @@ export default function SmartSetsPage() {
           </button>
         </div>
       ) : (
-        <div className="space-y-4">
-          {sets.map((set) => (
-            <SmartSetCard key={set.id} set={set} />
+        <div className="space-y-6">
+          {groups.map((group) => (
+            <WindowSection key={`${group.label}::${group.sportKey}`} group={group} />
           ))}
         </div>
       )}
@@ -81,25 +171,48 @@ export default function SmartSetsPage() {
   );
 }
 
-function StatPill({ label, value, color = "text-pi-primary" }: {
-  label: string; value: string | number; color?: string;
-}) {
+// ── Window section (one sport within one window) ──────────────────────────────
+
+function WindowSection({ group }: { group: WindowGroup }) {
+  const icon      = SPORT_ICONS[group.sportKey]  ?? "🏆";
+  const sportName = SPORT_LABELS[group.sportKey] ?? group.sportKey;
+
   return (
-    <div className="card px-3 py-2 text-center">
-      <p className="text-[10px] text-pi-muted section-label">{label}</p>
-      <p className={`font-bold ${color}`}>{value}</p>
-    </div>
+    <section>
+      {/* Window + sport header */}
+      <div className="flex items-center gap-2 mb-2">
+        <Calendar size={13} className="text-pi-violet shrink-0" />
+        <span className="text-[11px] font-semibold tracking-wider uppercase text-pi-violet">
+          {group.label}
+        </span>
+        <span className="text-pi-border/60 text-[10px]">·</span>
+        <span className="text-[11px] text-pi-secondary">{icon} {sportName}</span>
+        <span className="text-[10px] text-pi-muted ml-auto">
+          {group.sets.length} set{group.sets.length !== 1 ? "s" : ""}
+        </span>
+      </div>
+
+      <div className="space-y-3">
+        {group.sets.map((set) => (
+          <SmartSetCard key={set.id} set={set} />
+        ))}
+      </div>
+    </section>
   );
 }
 
+// ── SmartSetCard ──────────────────────────────────────────────────────────────
+
 function SmartSetCard({ set }: { set: SmartSet }) {
   const [expanded, setExpanded] = useState(set.set_number === 1);
+
   const confColor =
     set.overall_confidence >= 75 ? "text-pi-emerald" :
-    set.overall_confidence >= 60 ? "text-pi-amber" : "text-pi-rose";
+    set.overall_confidence >= 60 ? "text-pi-amber"   : "text-pi-rose";
+
   const riskBg =
     set.risk_level === "HIGH"   ? "bg-pi-emerald/12 border-pi-emerald/30 text-emerald-400" :
-    set.risk_level === "MEDIUM" ? "bg-pi-amber/12 border-pi-amber/30 text-amber-400" :
+    set.risk_level === "MEDIUM" ? "bg-pi-amber/12 border-pi-amber/30 text-amber-400"       :
                                   "bg-pi-rose/10 border-pi-rose/25 text-rose-400";
 
   return (
@@ -115,7 +228,7 @@ function SmartSetCard({ set }: { set: SmartSet }) {
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className={`text-lg font-bold tabular-nums ${confColor}`}>
-              {set.overall_confidence.toFixed(0)}
+              {set.overall_confidence.toFixed(0)}%
             </span>
             <span className="text-pi-muted text-xs">confidence</span>
             <span className={`text-xs px-2 py-0.5 rounded-full font-semibold border ${riskBg}`}>
@@ -123,7 +236,7 @@ function SmartSetCard({ set }: { set: SmartSet }) {
             </span>
           </div>
           <p className="text-xs text-pi-muted mt-0.5">
-            {set.match_count} matches · Combined prob: {(set.combined_probability * 100).toFixed(2)}%
+            {set.match_count} matches · Combined: {(set.combined_probability * 100).toFixed(2)}%
             {set.wins + set.losses > 0 && ` · ${set.wins}W/${set.losses}L`}
           </p>
         </div>
@@ -139,8 +252,14 @@ function SmartSetCard({ set }: { set: SmartSet }) {
             <SmartSetMatchRow key={m.match_id} match={m} idx={idx} />
           ))}
           <div className="px-4 py-2 bg-pi-surface/50 flex items-center gap-4 text-xs text-pi-secondary">
-            <span>Combined prob: <span className="text-pi-primary font-medium">{(set.combined_probability * 100).toFixed(3)}%</span></span>
-            <span>Avg odds: <span className="text-pi-amber font-medium">{set.avg_odds.toFixed(2)}</span></span>
+            <span>
+              Combined prob: <span className="text-pi-primary font-medium">
+                {(set.combined_probability * 100).toFixed(3)}%
+              </span>
+            </span>
+            <span>
+              Avg odds: <span className="text-pi-amber font-medium">{set.avg_odds.toFixed(2)}</span>
+            </span>
           </div>
         </div>
       )}
@@ -148,21 +267,41 @@ function SmartSetCard({ set }: { set: SmartSet }) {
   );
 }
 
+// ── SmartSetMatchRow ──────────────────────────────────────────────────────────
+
 function SmartSetMatchRow({ match: m, idx }: { match: SmartSetMatch; idx: number }) {
+  const navigate = useNavigate();
+  const slug     = getCompetitionSlug(m.competition ?? "");
+
   return (
     <Link to={`/match/${m.match_id}`}>
       <div className={`flex items-center gap-3 px-4 py-2.5 hover:bg-pi-indigo/5 transition-colors border-b border-pi-border/30 last:border-0 ${idx % 2 !== 0 ? "bg-pi-surface/30" : ""}`}>
-        <span className="text-xs text-pi-muted w-4">{idx + 1}</span>
-        <span className="text-sm">{m.sport_icon}</span>
+        <span className="text-xs text-pi-muted w-4 shrink-0">{idx + 1}</span>
+        <span className="text-sm shrink-0">{m.sport_icon}</span>
+
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium text-pi-primary truncate">
             {m.home_team} <span className="text-pi-muted">vs</span> {m.away_team}
           </p>
-          <p className="text-[11px] text-pi-muted truncate">{m.competition} · {formatDate(m.match_date)}</p>
+          <p className="text-[11px] text-pi-muted truncate">
+            {slug ? (
+              <button
+                className="hover:text-pi-sky transition-colors"
+                onClick={e => { e.preventDefault(); e.stopPropagation(); navigate(`/tables?slug=${slug}`); }}
+              >
+                {m.competition}
+              </button>
+            ) : m.competition}
+            {" · "}
+            <span className="text-pi-secondary/70">{localMatchTime(m.match_date)}</span>
+          </p>
         </div>
+
         <div className="flex items-center gap-2 shrink-0">
           <span className="text-xs text-pi-sky font-medium">{outcomeShort(m.predicted_outcome)}</span>
-          <span className="text-[11px] text-pi-secondary tabular-nums">{Math.round(m.top_prob * 100)}%</span>
+          <span className="text-[11px] text-pi-secondary tabular-nums">
+            {Math.round((m.top_prob ?? 0) * 100)}%
+          </span>
           <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full border ${
             m.ai_decision === "PLAY"
               ? "bg-pi-emerald/12 border-pi-emerald/30 text-emerald-400"
@@ -173,5 +312,25 @@ function SmartSetMatchRow({ match: m, idx }: { match: SmartSetMatch; idx: number
         </div>
       </div>
     </Link>
+  );
+}
+
+// ── StatPill ──────────────────────────────────────────────────────────────────
+
+function StatPill({ label, value, color = "text-white" }: {
+  label: string; value: string | number; color?: string;
+}) {
+  return (
+    <div
+      className="px-3 py-2 text-center rounded-xl"
+      style={{
+        background: "linear-gradient(145deg, rgba(28,40,76,0.98) 0%, rgba(18,28,58,0.98) 100%)",
+        border:     "1px solid rgba(99,120,210,0.48)",
+        boxShadow:  "0 2px 14px rgba(0,0,0,0.45), 0 1px 0 rgba(255,255,255,0.07) inset",
+      }}
+    >
+      <p className="text-[10px] font-semibold tracking-widest uppercase text-slate-400 mb-0.5">{label}</p>
+      <p className={`font-bold ${color}`}>{value}</p>
+    </div>
   );
 }

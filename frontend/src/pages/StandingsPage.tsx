@@ -1,10 +1,10 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   Trophy, Zap, Clock, Calendar, Users, ChevronRight,
   Newspaper, Star, ExternalLink,
 } from "lucide-react";
-import { Link } from "react-router-dom";
 import Spinner from "../components/Spinner";
 import { api } from "../api/client";
 
@@ -275,9 +275,22 @@ function FixtureRow({ fixture, slug }: { fixture: FixtureItem; slug: string }) {
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function StandingsPage() {
-  const [slug, setSlug]       = useState("eng.1");
+  const [searchParams] = useSearchParams();
+  const urlSlug = searchParams.get("slug");
+  const validUrlSlug = urlSlug && LEAGUES.some(l => l.slug === urlSlug) ? urlSlug : null;
+
+  const [slug, setSlug]       = useState(validUrlSlug ?? "eng.1");
   const [season, setSeason]   = useState(CURRENT_SEASON);
   const [pageTab, setPageTab] = useState<PageTab>("standings");
+
+  // Sync when URL param changes (e.g. user clicks a competition link from another page)
+  useEffect(() => {
+    if (validUrlSlug && validUrlSlug !== slug) {
+      setSlug(validUrlSlug);
+      setPageTab("standings");
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [validUrlSlug]);
 
   const isHistorical   = season !== CURRENT_SEASON;
   const selectedLeague = LEAGUES.find(l => l.slug === slug);
@@ -713,40 +726,45 @@ export default function StandingsPage() {
                     <div className="px-4 py-2.5 border-b border-pi-border/30 bg-pi-surface/40">
                       <p className="font-display font-bold text-pi-primary text-sm">{cat.name}</p>
                     </div>
-                    {cat.leaders.map((player, i) => (
-                      <Link
-                        key={player.player_id || i}
-                        to={player.player_id ? `/player/soccer/${player.player_id}` : "#"}
-                        className="flex items-center gap-3 px-4 py-3 border-b border-pi-border/10 last:border-0 hover:bg-white/[0.03] transition-colors group"
-                      >
-                        {/* Rank */}
-                        <span className={`w-6 text-center shrink-0 font-bold tabular-nums text-sm ${i === 0 ? "text-amber-400" : i === 1 ? "text-slate-300" : i === 2 ? "text-amber-600" : "text-pi-muted"}`}>
-                          {player.rank}
-                        </span>
-
-                        {/* Headshot */}
-                        <PlayerHeadshot id={player.player_id} src={player.headshot} name={player.name} />
-
-                        {/* Name + team */}
-                        <div className="flex-1 min-w-0">
-                          <p className="font-semibold text-pi-primary text-sm truncate group-hover:text-pi-indigo-light transition-colors">
-                            {player.name}
-                          </p>
-                          <div className="flex items-center gap-1.5 mt-0.5">
-                            {player.team_logo && (
-                              <img src={player.team_logo} alt={player.team_name} className="w-3.5 h-3.5 object-contain shrink-0"
-                                onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
-                            )}
-                            <span className="text-[11px] text-pi-muted truncate">{player.team_name}</span>
+                    {cat.leaders.map((player, i) => {
+                      const rankColor = i === 0 ? "text-amber-400" : i === 1 ? "text-slate-300" : i === 2 ? "text-amber-600" : "text-pi-muted";
+                      const inner = (
+                        <>
+                          <span className={`w-6 text-center shrink-0 font-bold tabular-nums text-sm ${rankColor}`}>
+                            {player.rank}
+                          </span>
+                          <PlayerHeadshot id={player.player_id} src={player.headshot} name={player.name} />
+                          <div className="flex-1 min-w-0">
+                            <p className="font-semibold text-pi-primary text-sm truncate group-hover:text-pi-indigo-light transition-colors">
+                              {player.name}
+                            </p>
+                            <div className="flex items-center gap-1.5 mt-0.5">
+                              {player.team_logo && (
+                                <img src={player.team_logo} alt={player.team_name} className="w-3.5 h-3.5 object-contain shrink-0"
+                                  onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                              )}
+                              <span className="text-[11px] text-pi-muted truncate">{player.team_name}</span>
+                            </div>
                           </div>
+                          <span className="text-xl font-extrabold text-pi-primary tabular-nums shrink-0">
+                            {player.display}
+                          </span>
+                          {player.player_id && (
+                            <ChevronRight size={14} className="text-pi-muted/40 group-hover:text-pi-indigo-light transition-colors shrink-0" />
+                          )}
+                        </>
+                      );
+                      const rowCls = "flex items-center gap-3 px-4 py-3 border-b border-pi-border/10 last:border-0 transition-colors group";
+                      return player.player_id ? (
+                        <Link key={player.player_id} to={`/player/soccer/${player.player_id}`} className={`${rowCls} hover:bg-white/[0.04] cursor-pointer`}>
+                          {inner}
+                        </Link>
+                      ) : (
+                        <div key={`${player.name}-${i}`} className={`${rowCls} opacity-70`}>
+                          {inner}
                         </div>
-
-                        {/* Stat value */}
-                        <span className="text-xl font-extrabold text-pi-primary tabular-nums shrink-0">
-                          {player.display}
-                        </span>
-                      </Link>
-                    ))}
+                      );
+                    })}
                   </div>
                 ))}
               </div>

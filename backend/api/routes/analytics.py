@@ -523,6 +523,15 @@ async def confidence_histogram(db: AsyncSession = Depends(get_async_session)):
     }
 
 
+# ── Training progress (live) ──────────────────────────────────────────────────
+
+@router.get("/training-progress")
+async def training_progress():
+    """Live training progress — poll this while is_training=true."""
+    from ml.training_progress import get_state
+    return get_state()
+
+
 # ── Model health ──────────────────────────────────────────────────────────────
 
 @router.get("/model-health")
